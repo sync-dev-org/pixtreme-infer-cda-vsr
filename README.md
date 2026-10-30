@@ -229,12 +229,14 @@ do not synchronize the host between requests.
 
 ## Dependencies
 
-- Runtime dependencies are `pixtreme-infer>=0.14.1`, `safetensors>=0.4`,
+- Runtime dependencies are `pixtreme-infer>=0.16.0`, `safetensors>=0.4`,
   `tensoracle>=1.1.0`, and the TensorRT runtime `tensorrt-cu13>=11,<12` that tensoracle uses.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
-  The `dev` dependency group installs `tensoracle[convert]`, whose PyTorch the tests
-  use to convert the public checkpoint and to compute reference values.
+  The `dev` dependency group installs `tensoracle[convert]` and PyTorch. The tests use
+  PyTorch to convert the public checkpoint, to compute reference values, and to run
+  TensorRT engines on the GPU. The development environment takes PyTorch from the
+  PyTorch `cu132` index (CUDA 13.2); the distributed wheel does not depend on PyTorch.
 
 ## Development
 
