@@ -229,7 +229,7 @@ do not synchronize the host between requests.
 
 ## Dependencies
 
-- Runtime dependencies are `pixtreme-infer>=0.16.0`, `safetensors>=0.4`,
+- Runtime dependencies are `pixtreme-infer>=0.16.1`, `safetensors>=0.4`,
   `tensoracle>=1.1.0`, and the TensorRT runtime `tensorrt-cu13>=11,<12` that tensoracle uses.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
