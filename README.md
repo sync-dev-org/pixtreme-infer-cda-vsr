@@ -293,16 +293,22 @@ Catch2 is fetched at its recorded commit only when C++ tests are enabled. GPU
 CTest cases have the `gpu` label. The lifecycle case takes the documented ×2
 `params_ema` safetensors checkpoint through `PIXTREME_CDA_VSR_CHECKPOINT`.
 
-Python GPU tests also use small native test networks. Build their helper before
-running pytest; test execution itself does not download or build code:
+Python tests use native helpers for import compatibility and small GPU test
+networks. Build the helpers before running pytest; test execution itself does
+not download or build code:
 
 ```console
 cmake -S tests/native -B ../build/python-tests -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE="$PWD/../build/native-sdk/bin/python" -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp;$CDA_SITE/nanobind/cmake" -Dpixtreme_infer_DIR="$CDA_INFER_CMAKE" -DCUDAToolkit_ROOT="$CDA_SITE/nvidia/cu13"
 cmake --build ../build/python-tests -j2
+uv run pytest tests/test_import.py
 uv run pytest -m "gpu and not performance"
 ```
 
-The helper is excluded from the wheel. Build release wheels in a manylinux
+The import tests use a separate extension that registers overlapping C++ types
+and check both import orders without a GPU. They skip with a build instruction
+when that helper is absent. The helpers are excluded from the wheel.
+
+Build release wheels in a manylinux
 environment, inspect them with `auditwheel show` and `readelf -d`, and retain
 pixtreme, pixtreme-infer and tensoracle as external wheel dependencies when applying the platform tag:
 
