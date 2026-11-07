@@ -246,7 +246,7 @@ calls or synchronize the host between requests.
 ## Dependencies
 
 - Runtime dependencies are `pixtreme>=2.6.0`, `pixtreme-infer>=0.20.0`, `safetensors>=0.4`,
-  `tensoracle>=2.1.0`, and the TensorRT runtime `tensorrt-cu13>=11,<12` that tensoracle uses.
+  `tensoracle>=2.1.1`, and the TensorRT runtime `tensorrt-cu13>=11,<12` that tensoracle uses.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
   The `dev` dependency group installs `tensoracle[convert]` and PyTorch. The tests use
@@ -281,7 +281,7 @@ Python or require nanobind:
 
 ```console
 uv venv ../build/native-sdk
-uv pip install --python ../build/native-sdk/bin/python 'tensoracle>=2.1.0' 'pixtreme-infer>=0.20.0' 'pixtreme>=2.6.0' 'nvidia-cuda-runtime>=13.2' 'nvidia-cuda-crt>=13.2' 'nanobind>=2.4'
+uv pip install --python ../build/native-sdk/bin/python 'tensoracle>=2.1.1' 'pixtreme-infer>=0.20.0' 'pixtreme>=2.6.0' 'nvidia-cuda-runtime>=13.2' 'nvidia-cuda-crt>=13.2' 'nanobind>=2.4'
 CDA_SITE=$(../build/native-sdk/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
 CDA_INFER_CMAKE=$(../build/native-sdk/bin/python -c 'import pixtreme.infer; print(pixtreme.infer.get_cmake_dir())')
 cmake -S ../cpp -B ../build/cpp -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp" -Dpixtreme_infer_DIR="$CDA_INFER_CMAKE" -DCUDAToolkit_ROOT="$CDA_SITE/nvidia/cu13"
