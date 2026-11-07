@@ -51,7 +51,7 @@ model = Model(
 stream = px.core.Stream(device=0, non_blocking=True)
 model.prepare(device=0, stream=stream.ptr)
 try:
-    # Make frame, mv and residual ready on this stream, then submit requests:
+    # Make the RGB Frame and mv/residual NDArrays ready on this stream:
     # output = model(frame, mv=mv, residual=residual, reset=False, stream=stream.ptr)
     pass
 finally:
@@ -193,18 +193,40 @@ the repository; weights and engines are not included in the distribution.
 
 ## Frame, state and stream requirements
 
-Call models with an RGB float32 Frame and C-contiguous CUDA float32 DLPack producers
+Call models with an RGB float32 Frame and C-contiguous CUDA float32 `pixtreme.NDArray` inputs
 `mv=(2,H,W)` and `residual=(1,H,W)` on the instance's device. Motion vectors use
 channel 0=x, 1=y and `reference = current + mv` in LR luma pixels. Residual values are
 signed luma residuals divided by the stream's luma black-to-white range, following
 `profile=hevc-mv-residual/4`: `219 * 2^(bit depth - 8)` for limited range and
 `255 * 2^(bit depth - 8)` for full range. Streams without a range indication use
 limited range. Values, units, matching picture identity,
-producer completion, model reference structure, and absence of concurrent calls to
+model reference structure, and absence of concurrent calls to
 one instance are caller preconditions. The caller decides when to reset.
 
 Make inputs ready on the stream passed to `prepare` and pass its numeric handle
-as `stream` on every request. Retain auxiliary storage until queued work finishes.
+as `stream` on every request. Wrap DLPack producers, such as CuPy arrays, with
+`pixtreme.NDArray.from_dlpack` before passing auxiliary inputs:
+
+```python
+import cupy as cp
+import pixtreme as px
+
+# frame, model and stream use the same CUDA device; model is already prepared.
+with cp.cuda.ExternalStream(stream.ptr):
+    h, w = model.contract.input_hw
+    mv_owner = cp.zeros((2, h, w), dtype=cp.float32)
+    residual_owner = cp.zeros((1, h, w), dtype=cp.float32)
+    mv = px.NDArray.from_dlpack(mv_owner, stream=stream.ptr)
+    residual = px.NDArray.from_dlpack(residual_owner, stream=stream.ptr)
+    output = model(frame, mv=mv, residual=residual, reset=False, stream=stream.ptr)
+    stream.synchronize()
+```
+
+The example uses zero motion and residual values; supply the decoded picture's
+values for inference. Core waits for each NDArray's recorded writer on the
+inference stream and records its read. For an NDArray borrowing external memory,
+keep the owner's memory alive until reads on the inference stream have completed.
+The example keeps both CuPy owners until synchronization completes.
 Core records reads of pixtreme-owned Frame pixels; borrowed Frame pixels retain
 the caller's storage-lifetime requirements. On another stream, wait for output
 writes using Frame `wait`, and record the last use with `record_stream`, or acquire
@@ -223,7 +245,7 @@ calls or synchronize the host between requests.
 
 ## Dependencies
 
-- Runtime dependencies are `pixtreme>=2.4.0`, `pixtreme-infer>=0.19.1`, `safetensors>=0.4`,
+- Runtime dependencies are `pixtreme>=2.6.0`, `pixtreme-infer>=0.20.0`, `safetensors>=0.4`,
   `tensoracle>=2.1.0`, and the TensorRT runtime `tensorrt-cu13>=11,<12` that tensoracle uses.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
@@ -259,7 +281,7 @@ Python or require nanobind:
 
 ```console
 uv venv ../build/native-sdk
-uv pip install --python ../build/native-sdk/bin/python 'tensoracle>=2.1.0' 'pixtreme-infer>=0.19.1' 'pixtreme>=2.4.0' 'nvidia-cuda-runtime>=13.2' 'nvidia-cuda-crt>=13.2' 'nanobind>=2.4'
+uv pip install --python ../build/native-sdk/bin/python 'tensoracle>=2.1.0' 'pixtreme-infer>=0.20.0' 'pixtreme>=2.6.0' 'nvidia-cuda-runtime>=13.2' 'nvidia-cuda-crt>=13.2' 'nanobind>=2.4'
 CDA_SITE=$(../build/native-sdk/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
 CDA_INFER_CMAKE=$(../build/native-sdk/bin/python -c 'import pixtreme.infer; print(pixtreme.infer.get_cmake_dir())')
 cmake -S ../cpp -B ../build/cpp -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp" -Dpixtreme_infer_DIR="$CDA_INFER_CMAKE" -DCUDAToolkit_ROOT="$CDA_SITE/nvidia/cu13"
@@ -285,7 +307,7 @@ environment, inspect them with `auditwheel show` and `readelf -d`, and retain
 pixtreme, pixtreme-infer and tensoracle as external wheel dependencies when applying the platform tag:
 
 ```console
-auditwheel repair --plat manylinux_2_28_x86_64 --only-plat --exclude libtensoracle.so.2 --exclude libpixtreme_infer.so.1 --exclude libpixtreme.so.2 --wheel-dir checked dist/*.whl
+auditwheel repair --plat manylinux_2_28_x86_64 --only-plat --exclude libtensoracle.so.2 --exclude libpixtreme_infer.so.2 --exclude libpixtreme.so.2 --wheel-dir checked dist/*.whl
 ```
 
 Use that tag only after the ELF dependencies satisfy its ABI requirements.
