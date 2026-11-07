@@ -1,6 +1,6 @@
 # pixtreme.infer.cda_vsr
 
-The pure Python distribution `pixtreme-infer-cda-vsr` provides the import package
+The distribution `pixtreme-infer-cda-vsr` provides the import package
 `pixtreme.infer.cda_vsr`: the CDA-VSR architecture module (causal recurrent
 online video super-resolution) for the pixtreme inference companion. The module
 reads the scale from a caller-supplied checkpoint's safetensors header, and the
@@ -26,68 +26,66 @@ For a project managed with uv:
 uv add pixtreme-infer-cda-vsr
 ```
 
-## Status
+The Linux wheel includes the compiled module; installation and inference do not
+require a compiler or a TensorRT SDK. Engine construction and execution use
+tensoracle's separately installed native library.
 
-Implemented:
+## Inference
 
-- The public module names `FACTORY`, `FAMILY_CONTRACT`, and `build_engine`. `FACTORY.query_contract` describes
-  an exact input shape and the accepted checkpoint structure without allocating device memory, and `FACTORY.open` returns a
-  stateful instance called as `instance(frame, mv=mv, residual=residual, reset=False)`.
-- Execution of separate I and P TensorRT engines with private recurrent state on the GPU.
-  The instance selects I for the first and reset requests and P for later requests.
-- `FACTORY.graph_factory()` selects CUDA Graph inference with the same checkpoint,
-  precision, input shape, parameters, and output contract.
-- The `mv` and `residual` parameter declarations, whose `unit` begins with the side-data profile
-  identifier `profile=hevc-mv-residual/4`.
-- `build_engine` prepares exact-shape I and P engines in `fp32` or `fp16` in the
-  [tensoracle](https://github.com/sync-dev-org/tensoracle) engine cache and returns the checkpoint's
-  `TemporalOpenContract`.
+Construct `Model` with a safetensors checkpoint, the computation precision and
+an exact input size. Construction inspects the checkpoint header without
+initializing CUDA or allocating GPU memory. The immutable `model.contract`
+describes the scale, precision, input size and state footprint;
+`model.family_contract` declares the RGB Frame and auxiliary inputs.
 
-GPU execution has been verified on sm86. Other GPU generations have not been verified.
+```python
+import pixtreme as px
+from pixtreme.infer.cda_vsr import Model
+
+model = Model(
+    weights="/path/to/checkpoints/best-inference.safetensors",
+    precision="fp16",
+    input_hw=(270, 480),
+    use_cuda_graph=False,
+)
+stream = px.core.Stream(device=0, non_blocking=True)
+model.prepare(device=0, stream=stream.ptr)
+try:
+    # Make frame, mv and residual ready on this stream, then submit requests:
+    # output = model(frame, mv=mv, residual=residual, reset=False, stream=stream.ptr)
+    pass
+finally:
+    stream.synchronize()
+    model.close()
+```
+
+`prepare` rechecks the checkpoint contract and opens the I and P engines.
+The first request and every explicit reset select I; subsequent requests select P.
+Each model owns two persistent GPU state buffers. Reset clears those buffers;
+it does not allocate new history. Multiple models keep independent histories.
+Calls before preparation, after failed preparation and after `close()` are
+rejected. Close is idempotent. Finish pending work before closing.
+
+A context manager prepares a newly constructed model with the default device and
+stream and closes it on exit. Prepare explicitly before entering the context
+when using another stream. Omitting a request's `stream` selects the legacy
+default stream; it does not select CuPy's current stream.
 
 ## CUDA Graph inference
 
-Select the graph factory before opening an instance. Its family and query contracts
-match `FACTORY`, and selecting or querying it performs no device allocation. Open
-the instance inside an explicit non-default CuPy stream and keep that device and
-stream for every request:
+Set `use_cuda_graph=True` in the same constructor and prepare with an explicit
+non-default stream. Core warms up and captures four routes: I and P for each
+direction of the two state buffers. Each route has a dedicated TensorRT execution.
+Preparation restores initial history and consumes no inference request.
 
-```python
-import cupy as cp
-from pixtreme.infer.cda_vsr import FACTORY
+Core validates each request before copying inputs, resetting state or replaying.
+Inputs are copied into fixed GPU storage and each returned Frame owns independent
+pixels. The normal path and graph path share the same state and route logic.
+Later requests, resets and model cleanup do not modify returned Frames.
 
-factory = FACTORY.graph_factory()
-checkpoint = "/path/to/checkpoints/best-inference.safetensors"
-contract = factory.query_contract(checkpoint, input_hw=(270, 480), precision="fp16")
-with cp.cuda.Device(0), cp.cuda.Stream(non_blocking=True) as stream:
-    instance = factory.open(checkpoint, input_hw=(270, 480), precision="fp16")
-    try:
-        # Prepare inputs on this stream, then submit each request:
-        # output = instance(frame, mv=mv, residual=residual, reset=False)
-        pass
-    finally:
-        stream.synchronize()
-        instance.close()
-```
-
-Open prepares four graphs: I and P for each direction of the two state buffers.
-Each graph owns a dedicated execution: two I executions and two P executions.
-Preparation restores initial history before returning; the first request and
-every explicit reset use I, and
-other requests use P. Reset clears the existing state allocations. There is no
-input-based reset detection.
-
-Every request validates Frame metadata, parameters, reset, device, and stream
-before modifying storage. The module copies RGB, motion vectors, and residuals
-into fixed GPU buffers, replays the selected graph, and returns an independent
-Frame with that request's metadata. Keep input storage alive until its copies
-complete and establish CUDA dependencies before consuming outputs on another
-stream. Later requests, resets, and close do not change returned Frames.
-
-One instance accepts one input shape and precision on its opening device and
-stream. Open a new instance to change those settings. Preparation errors fail
-open and release partially prepared resources; there is no automatic fallback or
-recapture. The normal factory retains its existing stream and request behavior.
+One model uses one shape, precision, device and stream. Create another model to
+change those settings. A failed preparation releases partial resources and leaves
+the model unavailable for inference. There is no automatic fallback or recapture.
 
 ## Prepare a checkpoint
 
@@ -109,42 +107,32 @@ copying an exported weight set to a separate safetensors file.
 
 Inference and engine building do not import PyTorch.
 
-## Open a checkpoint
+## Checkpoint validation and engines
 
-Pass the safetensors checkpoint to `FACTORY`. tensoracle opens compatible I and P engines
-from its cache, builds each missing engine, and manages the engine files. The cache follows
-`XDG_CACHE_HOME` (otherwise `~/.cache`) under `tensoracle`. The graph version includes
-the selected precision, I/P route, and residual gate, so each combination occupies a separate cache entry.
-I/P selection happens in the instance, without a conditional inside either engine or an
-`is_first` engine input. The graph's tensor types determine computation precision; all engines keep their
-inputs, outputs and recurrent state in float32.
-
-```python
-from pixtreme.infer.cda_vsr import FACTORY
-
-checkpoint = "/path/to/checkpoints/best-inference.safetensors"
-contract = FACTORY.query_contract(checkpoint, input_hw=(270, 480), precision="fp16")
-instance = FACTORY.open(checkpoint, input_hw=(270, 480), precision="fp16")
-# output = instance(frame, mv=mv, residual=residual, reset=False)
-# Synchronize outstanding work on the request stream before closing.
-instance.close()
-```
+Pass the checkpoint as `Model(weights=..., precision=..., input_hw=(H, W))`.
+During preparation, tensoracle opens compatible I and P engines from its cache,
+builds missing engines, and manages the files. The cache follows `XDG_CACHE_HOME`
+(otherwise `~/.cache`) under `tensoracle`. The graph identity includes precision,
+I/P route and residual gate. Each combination has a separate cache entry.
+I/P selection happens in the native model; neither engine has a conditional route
+or an `is_first` input. Inputs, outputs and recurrent state remain float32 in both
+fp32 and fp16 engines.
 
 Checkpoint paths accept strings or `os.PathLike[str]` objects. The format is checked
 from the file contents, regardless of filename extension. PyTorch checkpoints
 (`torch.save` ZIP and legacy pickle) and engine files are rejected with instructions
-to use the checkpoint producer's export described above. `query_contract` checks
+to use the checkpoint producer's export described above. The constructor checks
 that the safetensors header is readable; it never imports PyTorch or TensorRT,
 allocates device memory, builds an engine, or writes
 to the cache. It identifies weight sets by the common prefix before the documented
 tensor names; names without a prefix form an unnamed set. Even a partially present
-set counts. If there are multiple sets or none, query and open report the discovered
+set counts. If there are multiple sets or none, construction and preparation report the discovered
 names and request a checkpoint containing exactly one inference set, before reading
 tensor values or creating a cached engine.
 
 The safetensors header metadata (`__metadata__`) must contain
 `cda_vsr.residual_unit=luma-range`, recording the residual unit used during training.
-`query_contract`, `open`, and `build_engine` reject absent metadata, a missing key,
+construction, preparation, and `build_engine` reject absent metadata, a missing key,
 or any other value with the observed value (or its absence) and the accepted value
 `luma-range`, before reading tensor values or creating an engine cache. Preserve
 the producer's metadata when copying an exported weight set.
@@ -155,26 +143,26 @@ the network uses `aligned * sigmoid(w)`, where `w` is
 the output of the three `conv_weight_l` convolutions and their intervening
 LeakyReLU activations. When the gate key is absent, the network uses
 `aligned * (1 + w)`. Any other value
-is rejected by `query_contract`, `open`, and `build_engine` with the observed value
+is rejected by construction, preparation, and `build_engine` with the observed value
 and instructions to use `sigmoid` or omit the key, before reading tensor values or
 creating an engine cache. The checkpoint producer records the gate used during
 training. Both gate forms are computed in float32, including in fp16 engines.
 
-Query reads the shape of `upconv1.weight` within that sole set from the header and
+The constructor reads the shape of `upconv1.weight` within that sole set from the header and
 derives scale from its output channel count, `3 * scale**2`. The tensor must have
 four dimensions and scale must be a positive integer; a missing tensor or an
 incompatible shape is rejected with the observed and expected values. The
 persistent state footprint follows the architecture and requested dimensions.
-Query does not read tensor values.
+Construction does not read tensor values.
 
-A cache miss validates all 179 tensor names, shapes and float32 dtypes in the sole
+Preparation validates all 179 tensor names, shapes and float32 dtypes in the sole
 set before saving an engine in the cache. Extra tensor names under that prefix
 are rejected; for an unnamed set, every tensor belongs to the set. Unrelated
 tensors outside a named set are ignored. The reconstruction head and base image resize use
 the checkpoint's scale; the remaining network structure uses 64 features, 3 feature
 extraction blocks, 24 I reconstruction blocks, 12 P reconstruction blocks and 4 DCN
-groups. An incompatible checkpoint may therefore be queried successfully and fail
-when opened. Each engine accepts the exact requested `(H, W)`
+groups. An incompatible checkpoint may therefore be constructed successfully and fail
+when prepared. Each engine accepts the exact requested `(H, W)`
 and precision (`"fp32"` or `"fp16"`). Unsupported precision and dimensions are
 rejected before the checkpoint is read.
 
@@ -185,7 +173,7 @@ an engine on a cache miss and opening a cached engine both need a compatible NVI
 GPU; neither imports PyTorch. A checkpoint that fails validation does not leave an
 engine in the cache.
 
-To complete the initial build before processing frames, use the same open/close path:
+To complete the initial build before processing frames, use the same preparation and cleanup:
 
 ```python
 from pixtreme.infer.cda_vsr import build_engine
@@ -199,13 +187,13 @@ contract = build_engine(
 
 `build_engine` accepts no destination and writes no caller-managed engine file.
 tensoracle owns the two cached engine files. The returned contract equals
-`FACTORY.query_contract` with the same checkpoint, dimensions and precision.
-Subsequent `FACTORY.open` calls reuse both prepared engines. Keep checkpoints outside
+`Model(...).contract` with the same weights, dimensions and precision.
+Subsequent model preparations reuse both engines. Keep checkpoints outside
 the repository; weights and engines are not included in the distribution.
 
 ## Frame, state and stream requirements
 
-Call instances with an RGB float32 Frame and C-contiguous CUDA float32 arrays
+Call models with an RGB float32 Frame and C-contiguous CUDA float32 DLPack producers
 `mv=(2,H,W)` and `residual=(1,H,W)` on the instance's device. Motion vectors use
 channel 0=x, 1=y and `reference = current + mv` in LR luma pixels. Residual values are
 signed luma residuals divided by the stream's luma black-to-white range, following
@@ -215,22 +203,28 @@ limited range. Values, units, matching picture identity,
 producer completion, model reference structure, and absence of concurrent calls to
 one instance are caller preconditions. The caller decides when to reset.
 
-Make inputs ready on the current CuPy stream and retain their allocations until that
-stream has finished reading them. Use the same stream for every request to an instance.
-The first request may use a different stream from open; the module orders initial
-state readiness. Establish dependencies before consuming returned Frames on other
-streams, and synchronize outstanding work before close. Later requests, reset and
-close do not change previously returned Frames. Every accepted request returns an
-output, including first and reset requests. The module keeps its own persistent
-state and does not retain caller buffers across calls. It allocates two state buffers
-once at open and exchanges their input/output roles after each request, without copying
-history between them. Reset clears the buffers without allocating them again. Calls
-do not synchronize the host between requests.
+Make inputs ready on the stream passed to `prepare` and pass its numeric handle
+as `stream` on every request. Retain auxiliary storage until queued work finishes.
+Core records reads of pixtreme-owned Frame pixels; borrowed Frame pixels retain
+the caller's storage-lifetime requirements. On another stream, wait for output
+writes using Frame `wait`, and record the last use with `record_stream`, or acquire
+pixels through DLPack for its stream handoff. Use `cupy.from_dlpack(output)` to
+access output pixels; there is no `Frame.data` property.
+
+Graph outputs are allocated on the inference stream. Keep an external stream
+alive until all returned Frames, shallow clones and DLPack views are released,
+even after closing the model. Pixtreme retains its own `px.core.Stream` for those
+allocations. Synchronize pending work before releasing backend resources.
+
+Every accepted request returns one output, including first and reset requests.
+The model owns its persistent history and exchanges the input/output roles of its
+two state buffers after each request. It does not retain caller buffers across
+calls or synchronize the host between requests.
 
 ## Dependencies
 
-- Runtime dependencies are `pixtreme>=2.2.0`, `pixtreme-infer>=0.17.0`, `safetensors>=0.4`,
-  `tensoracle>=1.6.0`, and the TensorRT runtime `tensorrt-cu13>=11,<12` that tensoracle uses.
+- Runtime dependencies are `pixtreme>=2.4.0`, `pixtreme-infer>=0.18.0`, `safetensors>=0.4`,
+  `tensoracle>=2.0.0`, and the TensorRT runtime `tensorrt-cu13>=11,<12` that tensoracle uses.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
   The `dev` dependency group installs `tensoracle[convert]` and PyTorch. The tests use
@@ -240,9 +234,11 @@ do not synchronize the host between requests.
 
 ## Development
 
-Run development commands from the root of a development checkout:
+The development checkout contains an independent CMake project in `cpp/` and the
+Python project in `python/`. Run Python development commands from `python/`:
 
 ```console
+cd python
 uv sync --group dev
 uv lock --check
 uv run python -m pytest
@@ -251,9 +247,56 @@ uv run mypy
 uv build --wheel
 ```
 
+`uv sync` obtains build dependencies from Python wheels, including CUDA headers.
+The TensorRT headers used by the native network are checked against the source
+manifest during CMake configuration. No OS-installed CUDA toolkit or TensorRT SDK
+is needed. Editable installation preserves the namespace initializers supplied
+by pixtreme and pixtreme-infer.
+
+For standalone C++ tests, prepare an SDK environment with uv and pass its installed
+headers and library to CMake. The `cpp/` configuration and tests do not invoke
+Python or require nanobind:
+
+```console
+uv venv ../build/native-sdk
+uv pip install --python ../build/native-sdk/bin/python 'tensoracle>=2.0.0' 'pixtreme-infer>=0.18.0' 'pixtreme>=2.4.0' 'nvidia-cuda-runtime>=13.2' 'nvidia-cuda-crt>=13.2' 'nanobind>=2.4'
+CDA_SITE=$(../build/native-sdk/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+CDA_INFER_CMAKE=$(../build/native-sdk/bin/python -c 'import pixtreme.infer; print(pixtreme.infer.get_cmake_dir())')
+cmake -S ../cpp -B ../build/cpp -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp" -Dpixtreme_infer_DIR="$CDA_INFER_CMAKE" -DCUDAToolkit_ROOT="$CDA_SITE/nvidia/cu13"
+cmake --build ../build/cpp -j2
+ctest --test-dir ../build/cpp --output-on-failure -LE gpu
+```
+
+Catch2 is fetched at its recorded commit only when C++ tests are enabled. GPU
+CTest cases have the `gpu` label. The lifecycle case takes the documented ×2
+`params_ema` safetensors checkpoint through `PIXTREME_CDA_VSR_CHECKPOINT`.
+
+Python GPU tests also use small native test networks. Build their helper before
+running pytest; test execution itself does not download or build code:
+
+```console
+cmake -S tests/native -B ../build/python-tests -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE="$PWD/../build/native-sdk/bin/python" -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp;$CDA_SITE/nanobind/cmake" -Dpixtreme_infer_DIR="$CDA_INFER_CMAKE" -DCUDAToolkit_ROOT="$CDA_SITE/nvidia/cu13"
+cmake --build ../build/python-tests -j2
+uv run pytest -m "gpu and not performance"
+```
+
+The helper is excluded from the wheel. Build release wheels in a manylinux
+environment, inspect them with `auditwheel show` and `readelf -d`, and retain
+pixtreme, pixtreme-infer and tensoracle as external wheel dependencies when applying the platform tag:
+
+```console
+auditwheel repair --plat manylinux_2_28_x86_64 --only-plat --exclude libtensoracle.so.2 --exclude libpixtreme_infer.so.1 --exclude libpixtreme.so.2 --wheel-dir checked dist/*.whl
+```
+
+Use that tag only after the ELF dependencies satisfy its ABI requirements.
+The extension uses `$ORIGIN/../lib` for pixtreme-infer,
+`$ORIGIN/../../core/lib` for pixtreme and
+`$ORIGIN/../../../tensoracle/cpp/lib` for tensoracle. Libraries supplied by those
+wheels, TensorRT and the NVIDIA driver are not copied into this wheel.
+
 ## Versioning and release
 
-The version is derived by hatch-vcs from tags of the form `vX.Y.Z`
+The version is derived by setuptools-scm through scikit-build-core from tags of the form `vX.Y.Z`
 at the repository root; tags with other prefixes do not affect it.
 
 Each version is distributed on PyPI as `pixtreme-infer-cda-vsr`. The same wheel and
@@ -264,4 +307,7 @@ not dependency sources.
 
 ## License
 
-This distribution is licensed under the [MIT License](LICENSE).
+The module is licensed under the [MIT License](LICENSE). The native wheel also
+contains nanobind (BSD-3-Clause), robin-map (MIT), compiled code from TensorRT
+headers (Apache-2.0), and the CUDA runtime. Their complete license notices are included in
+`dist-info/licenses/`; the wheel declares `MIT AND BSD-3-Clause AND Apache-2.0`.
