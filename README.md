@@ -30,6 +30,10 @@ The Linux wheel includes the compiled module; installation and inference do not
 require a compiler or a TensorRT SDK. Engine construction and execution use
 tensoracle's separately installed native library.
 
+The wheel also contains the PEP 561 marker `py.typed` and `_native.pyi`, a stub
+that nanobind generates from the compiled module during the build, so IDEs and
+type checkers see the constructor arguments, methods and properties of `Model`.
+
 ## Inference
 
 Construct `Model` with a safetensors checkpoint, the computation precision and
@@ -273,7 +277,9 @@ uv build --wheel
 The TensorRT headers used by the native network are checked against the source
 manifest during CMake configuration. No OS-installed CUDA toolkit or TensorRT SDK
 is needed. Editable installation preserves the namespace initializers supplied
-by pixtreme and pixtreme-infer.
+by pixtreme and pixtreme-infer. The build generates `_native.pyi` from the
+compiled module; editable installation places it in `src/pixtreme/infer/cda_vsr/`,
+where Git ignores it.
 
 For standalone C++ tests, prepare an SDK environment with uv and pass its installed
 headers and library to CMake. The `cpp/` configuration and tests do not invoke
