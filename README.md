@@ -136,7 +136,7 @@ tensor values or creating a cached engine.
 
 The safetensors header metadata (`__metadata__`) must contain
 `cda_vsr.residual_unit=luma-range`, recording the residual unit used during training.
-construction, preparation, and `build_engine` reject absent metadata, a missing key,
+Construction and preparation reject absent metadata, a missing key,
 or any other value with the observed value (or its absence) and the accepted value
 `luma-range`, before reading tensor values or creating an engine cache. Preserve
 the producer's metadata when copying an exported weight set.
@@ -147,7 +147,7 @@ the network uses `aligned * sigmoid(w)`, where `w` is
 the output of the three `conv_weight_l` convolutions and their intervening
 LeakyReLU activations. When the gate key is absent, the network uses
 `aligned * (1 + w)`. Any other value
-is rejected by construction, preparation, and `build_engine` with the observed value
+is rejected by construction and preparation with the observed value
 and instructions to use `sigmoid` or omit the key, before reading tensor values or
 creating an engine cache. The checkpoint producer records the gate used during
 training. Both gate forms are computed in float32, including in fp16 engines.
@@ -177,23 +177,20 @@ an engine on a cache miss and opening a cached engine both need a compatible NVI
 GPU; neither imports PyTorch. A checkpoint that fails validation does not leave an
 engine in the cache.
 
-To complete the initial build before processing frames, use the same preparation and cleanup:
+To complete the initial build before processing frames, prepare a model and close it:
 
 ```python
-from pixtreme.infer.cda_vsr import build_engine
+from pixtreme.infer.cda_vsr import Model
 
-contract = build_engine(
-    "/path/to/checkpoints/best-inference.safetensors",
-    input_hw=(270, 480),
-    precision="fp16",
-)
+model = Model("/path/to/checkpoints/best-inference.safetensors", precision="fp16", input_hw=(270, 480))
+model.prepare(device=0)
+model.close()
 ```
 
-`build_engine` accepts no destination and writes no caller-managed engine file.
-tensoracle owns the two cached engine files. The returned contract equals
-`Model(...).contract` with the same weights, dimensions and precision.
-Subsequent model preparations reuse both engines. Keep checkpoints outside
-the repository; weights and engines are not included in the distribution.
+Preparation writes no caller-managed engine file; tensoracle owns the two cached
+engine files. Later preparations with the same weights, dimensions and precision
+reuse both engines. Keep checkpoints outside the repository; weights and engines
+are not included in the distribution.
 
 ## Frame, state and stream requirements
 
@@ -247,10 +244,100 @@ The model owns its persistent history and exchanges the input/output roles of it
 two state buffers after each request. It does not retain caller buffers across
 calls or synchronize the host between requests.
 
+## Use from C and C++
+
+The wheel also contains a native SDK under `pixtreme/infer/cda_vsr/`: the shared
+library `lib/libpixtreme_infer_cda_vsr.so.1`, the C header
+`include/pixtreme/infer/cda_vsr.h`, the header-only C++ wrapper
+`include/pixtreme/infer/cda_vsr.hpp` and the CMake package `pixtreme_infer_cda_vsr`
+in `lib/cmake/pixtreme_infer_cda_vsr/`. The package finds the pixtreme-infer
+package installed in the same environment; the shared library locates the
+pixtreme, pixtreme-infer and tensoracle libraries of the installed wheels. The
+Python `Model` is a binding of the same C++ wrapper.
+
+```cmake
+find_package(pixtreme_infer_cda_vsr CONFIG REQUIRED)
+add_executable(app main.c)
+target_link_libraries(app PRIVATE pixtreme_infer_cda_vsr::pixtreme_infer_cda_vsr)
+```
+
+```console
+SITE=$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+cmake -S . -B build -Dpixtreme_infer_cda_vsr_DIR="$SITE/pixtreme/infer/cda_vsr/lib/cmake/pixtreme_infer_cda_vsr"
+```
+
+`pixtreme_infer_cda_vsr_model_create` takes the same values as the Python
+constructor and returns a pixtreme-infer core model handle. Prepare, run, close
+and destroy the model with the core C functions in `pixtreme/infer/core.h`.
+Creation reads only the checkpoint header and does not use CUDA. Invalid values
+and unusable checkpoints return `PIXTREME_INFER_INVALID_ARGUMENT` with the
+diagnostic that the Python constructor reports for the same input.
+Each call below returns `PIXTREME_INFER_SUCCESS` or another status; on failure,
+read `pixtreme_infer_error_message(error)` and release it with
+`pixtreme_infer_error_destroy(error)`.
+
+```c
+#include <pixtreme/infer/cda_vsr.h>
+
+pixtreme_infer_error_t *error = NULL;
+pixtreme_infer_cda_vsr_check_abi(PIXTREME_INFER_CDA_VSR_ABI_MAJOR, PIXTREME_INFER_CDA_VSR_ABI_MINOR, &error);
+
+pixtreme_infer_cda_vsr_model_options_t options = PIXTREME_INFER_CDA_VSR_MODEL_OPTIONS_INIT;
+options.checkpoint = "/path/to/checkpoints/best-inference.safetensors";
+options.precision = "fp16";
+options.input_height = 270;
+options.input_width = 480;
+options.use_cuda_graph = 0;
+pixtreme_infer_model_t *model = NULL;
+pixtreme_infer_cda_vsr_model_create(&options, &model, &error);
+
+pixtreme_infer_prepare_options_t prepare = PIXTREME_INFER_PREPARE_OPTIONS_INIT;
+prepare.device = 0;
+prepare.stream = stream; /* a pixtreme_stream_t; CUDA Graph needs a non-default stream */
+pixtreme_infer_model_prepare(model, &prepare, &error);
+
+/* request.frame is the RGB float32 Frame; request.params names the "mv" (2,H,W) and
+ * "residual" (1,H,W) float32 NDArrays; request.reset and request.stream as in Python. */
+pixtreme_frame_t *output = NULL;
+pixtreme_infer_model_run(model, &request, &output, &error);
+
+pixtreme_infer_model_close(model, &error); /* after the stream's work has finished */
+pixtreme_infer_model_destroy(model);
+```
+
+The C++ wrapper throws `pixtreme::infer::Error` and owns the model:
+
+```cpp
+#include <pixtreme/infer/cda_vsr.hpp>
+
+pixtreme::infer::cda_vsr::Model model("/path/to/checkpoints/best-inference.safetensors", "fp16", 270, 480);
+model.prepare(&prepare);
+pixtreme::frame output = model.run(frame, {{"mv", mv}, {"residual", residual}}, stream);
+model.close();
+```
+
+The Frame, NDArray, stream and reset requirements of the Python section above
+apply unchanged. Keep the module library loaded until every model handle is
+destroyed; linking the CMake target does this.
+
+### C ABI version
+
+This module's C ABI has its own version, `PIXTREME_INFER_CDA_VSR_ABI_MAJOR` and
+`PIXTREME_INFER_CDA_VSR_ABI_MINOR` in `cda_vsr.h` (currently 1.0). It is
+independent of the distribution version and of pixtreme-infer's core C ABI.
+`pixtreme_infer_cda_vsr_abi_version` reports the loaded library's version, and
+`pixtreme_infer_cda_vsr_check_abi` returns `PIXTREME_INFER_INCOMPATIBLE_ABI`
+unless the header's major equals the library's major and the header's minor is
+not newer than the library's minor. Call it with the header constants before
+creating models; the C++ wrapper's constructor and
+`pixtreme::infer::cda_vsr::require_abi()` perform the same check. The shared
+library's SONAME carries the major (`libpixtreme_infer_cda_vsr.so.1`), so a
+program linked against one major does not load a library of another major.
+
 ## Dependencies
 
-- Runtime dependencies are `pixtreme>=2.6.0`, `pixtreme-infer>=0.20.1`, `safetensors>=0.4`,
-  `tensoracle>=2.1.1`, and the TensorRT runtime `tensorrt-cu13>=11,<12` that tensoracle uses.
+- Runtime dependencies are `pixtreme>=2.6.0`, `pixtreme-infer>=0.21.0`, `safetensors>=0.4`,
+  `tensoracle>=2.1.2`, and the TensorRT runtime `tensorrt-cu13>=11,<12` that tensoracle uses.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
   The `dev` dependency group installs `tensoracle[convert]` and PyTorch. The tests use
@@ -287,7 +374,7 @@ Python or require nanobind:
 
 ```console
 uv venv ../build/native-sdk
-uv pip install --python ../build/native-sdk/bin/python 'tensoracle>=2.1.1' 'pixtreme-infer>=0.20.1' 'pixtreme>=2.6.0' 'nvidia-cuda-runtime>=13.2' 'nvidia-cuda-crt>=13.2' 'nanobind>=2.4'
+uv pip install --python ../build/native-sdk/bin/python 'tensoracle>=2.1.2' 'pixtreme-infer>=0.21.0' 'pixtreme>=2.6.0' 'nvidia-cuda-runtime>=13.2' 'nvidia-cuda-crt>=13.2' 'nanobind>=2.4'
 CDA_SITE=$(../build/native-sdk/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
 CDA_INFER_CMAKE=$(../build/native-sdk/bin/python -c 'import pixtreme.infer; print(pixtreme.infer.get_cmake_dir())')
 cmake -S ../cpp -B ../build/cpp -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp" -Dpixtreme_infer_DIR="$CDA_INFER_CMAKE" -DCUDAToolkit_ROOT="$CDA_SITE/nvidia/cu13"
@@ -296,12 +383,17 @@ ctest --test-dir ../build/cpp --output-on-failure -LE gpu
 ```
 
 Catch2 is fetched at its recorded commit only when C++ tests are enabled. GPU
-CTest cases have the `gpu` label. The lifecycle case takes the documented ×2
-`params_ema` safetensors checkpoint through `PIXTREME_CDA_VSR_CHECKPOINT`.
+CTest cases have the `gpu` label. The lifecycle case and the C entry's GPU cases
+take the documented ×2 `params_ema` safetensors checkpoint through
+`PIXTREME_CDA_VSR_CHECKPOINT`; the C entry's GPU cases add the residual-unit
+metadata to a temporary copy and keep their engines under the build directory.
 
-Python tests use native helpers for import compatibility and small GPU test
-networks. Build the helpers before running pytest; test execution itself does
-not download or build code:
+Python tests use native helpers for import compatibility, the C++ checkpoint
+inspection, direct access to the module's TensorRT engines, and small GPU test
+networks. Build the helpers before running pytest. Test execution does not
+download code; the only code it builds is a small C and C++ consumer of the
+installed CMake package, which needs CMake and C and C++ compilers and is skipped
+when they are absent:
 
 ```console
 cmake -S tests/native -B ../build/python-tests -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE="$PWD/../build/native-sdk/bin/python" -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp;$CDA_SITE/nanobind/cmake" -Dpixtreme_infer_DIR="$CDA_INFER_CMAKE" -DCUDAToolkit_ROOT="$CDA_SITE/nvidia/cu13"
@@ -311,22 +403,27 @@ uv run pytest -m "gpu and not performance"
 ```
 
 The import tests use a separate extension that registers overlapping C++ types
-and check both import orders without a GPU. They skip with a build instruction
-when that helper is absent. The helpers are excluded from the wheel.
+and check both import orders without a GPU. The import tests and the checkpoint
+inspection tests skip with a build instruction when the helpers are absent. The
+helpers are excluded from the wheel.
 
 Build release wheels in a manylinux
 environment, inspect them with `auditwheel show` and `readelf -d`, and retain
 pixtreme, pixtreme-infer and tensoracle as external wheel dependencies when applying the platform tag:
 
 ```console
-auditwheel repair --plat manylinux_2_28_x86_64 --only-plat --exclude libtensoracle.so.2 --exclude libpixtreme_infer.so.2 --exclude libpixtreme.so.2 --wheel-dir checked dist/*.whl
+auditwheel repair --plat manylinux_2_28_x86_64 --only-plat --exclude libtensoracle.so.2 --exclude libpixtreme_infer.so.3 --exclude libpixtreme.so.2 --wheel-dir checked dist/*.whl
 ```
 
 Use that tag only after the ELF dependencies satisfy its ABI requirements.
-The extension uses `$ORIGIN/../lib` for pixtreme-infer,
+The extension uses `$ORIGIN/lib` for this module's C entry library,
+`$ORIGIN/../lib` for pixtreme-infer,
 `$ORIGIN/../../core/lib` for pixtreme and
-`$ORIGIN/../../../tensoracle/cpp/lib` for tensoracle. Libraries supplied by those
-wheels, TensorRT and the NVIDIA driver are not copied into this wheel.
+`$ORIGIN/../../../tensoracle/cpp/lib` for tensoracle. The C entry library in
+`lib/` uses `$ORIGIN/../../lib`, `$ORIGIN/../../../core/lib` and
+`$ORIGIN/../../../../tensoracle/cpp/lib` for the same libraries. Libraries supplied by those
+wheels, TensorRT and the NVIDIA driver are not copied into this wheel; the wheel
+contains only the versioned file `libpixtreme_infer_cda_vsr.so.1` of its own library.
 
 ## Versioning and release
 
