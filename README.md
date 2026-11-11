@@ -400,7 +400,7 @@ program linked against one major does not load a library of another major.
 
 ## Dependencies
 
-- Runtime dependencies are `pixtreme>=2.14.0`, `pixtreme-infer>=0.22.0`, `safetensors>=0.4`,
+- Runtime dependencies are `pixtreme>=2.17.0`, `pixtreme-infer>=0.23.0`, `safetensors>=0.4`,
   `tensoracle>=2.1.2`, and the TensorRT runtime `tensorrt-cu13>=11,<12` that tensoracle uses.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
@@ -416,41 +416,51 @@ Python project in `python/`. Run Python development commands from `python/`:
 
 ```console
 cd python
-uv sync --group dev
+uv sync --group dev --no-install-project
+uv pip install --no-deps --reinstall-package pixtreme-infer-cda-vsr .
 uv lock --check
-uv run python -m pytest
-uv run ruff check . && uv run ruff format --check .
-uv run mypy
+uv run --no-sync python -m pytest
+uv run --no-sync ruff check . && uv run --no-sync ruff format --check .
+uv run --no-sync mypy
 uv build --wheel
 ```
 
-`uv sync` installs the pinned Conan CLI from the build requirements. Before CMake
-configures the compiler, Conan resolves the locked CUDA runtime/CRT and TensorRT
-headers. The repository recipes verify NVIDIA downloads against their SHA-256
-manifests. No OS-installed CUDA toolkit or TensorRT SDK is needed. Companion
-libraries and nanobind continue to come from Python wheels. Editable installation preserves the namespace initializers supplied
-by pixtreme and pixtreme-infer. The build generates `_native.pyi` from the
-compiled module; editable installation places it in `src/pixtreme/infer/cda_vsr/`,
-where Git ignores it.
+The isolated wheel build installs the pinned Conan CLI from the build requirements.
+Before CMake configures the compiler, the bootstrap downloads the recipe archives
+of the locked pixtreme and pixtreme-infer versions from their public GitHub
+Releases over HTTPS, without credentials. It verifies the archives with each
+Release's `SHA256SUMS`, exports their recipes, checks their revisions against
+`cpp/conan.lock`, and installs the dependencies. The SDK recipes unpack prebuilt
+shared libraries; they never compile either upstream. The common
+`pixtreme-cuda-toolkit` recipe supplies CUDA runtime/CRT with `compiler=False`,
+and the local TensorRT header recipe verifies NVIDIA's headers. No OS-installed
+CUDA toolkit or TensorRT SDK is needed. Only tensoracle's SDK and nanobind still
+come from Python wheels, pending tensoracle's Conan packaging.
 
-For standalone C++ tests, prepare an SDK environment with uv and pass its installed
-headers and library to CMake. The `cpp/` configuration and tests do not invoke
+Stub generation inspects the built binding with empty parent packages on its
+import path. It does not import pixtreme's Python extension or load another
+pixtreme library. The generated `_native.pyi` retains `Model` and `BackendError`.
+The development environment uses an installed wheel so that the parent package
+initializers remain owned by pixtreme and pixtreme-infer. After changing source
+or running `uv sync`, repeat the `uv pip install` command above and use
+`uv run --no-sync` for subsequent commands.
+
+For standalone C++ tests, prepare tensoracle's SDK and nanobind with uv. Conan supplies the pixtreme and pixtreme-infer SDKs. The `cpp/` configuration and tests do not invoke
 Python or require nanobind:
 
 ```console
 uv venv ../build/native-sdk
-uv pip install --python ../build/native-sdk/bin/python 'tensoracle>=2.1.2' 'pixtreme-infer>=0.22.0' 'pixtreme>=2.14.0' 'nanobind>=2.4'
+uv pip install --python ../build/native-sdk/bin/python 'tensoracle>=2.1.2' 'nanobind>=2.4'
 CDA_SITE=$(../build/native-sdk/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
-CDA_INFER_CMAKE=$(../build/native-sdk/bin/python -c 'import pixtreme.infer; print(pixtreme.infer.get_cmake_dir())')
 uv tool install "$(.venv/bin/python -c 'import tomllib; print(next(r for r in tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"] if r.startswith("conan==")))')"
 cmake -P ../cpp/conan/prepare-tests.cmake
-cmake -S ../cpp -B ../build/cpp -G Ninja -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp" -Dpixtreme_infer_DIR="$CDA_INFER_CMAKE"
+cmake -S ../cpp -B ../build/cpp -G Ninja -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp"
 cmake --build ../build/cpp -j2
 ctest --test-dir ../build/cpp --output-on-failure -LE gpu
 ```
 
-The preparation command installs the locked CUDA, TensorRT headers and Catch2
-packages. C++ test configuration and Python native helper configuration use only
+The preparation command installs both locked SDKs, CUDA, TensorRT headers and
+Catch2 packages. C++ test configuration and Python native helper configuration use only
 prepared packages (`--no-remote --build=never`) and never export recipes. Missing
 dependencies fail configuration with the preparation command. GPU CTest cases
 have the `gpu` label. The lifecycle case and the C entry's GPU cases
@@ -466,10 +476,10 @@ installed CMake package, which needs CMake and C and C++ compilers and is skippe
 when they are absent:
 
 ```console
-cmake -S tests/native -B ../build/python-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE="$PWD/../build/native-sdk/bin/python" -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp;$CDA_SITE/nanobind/cmake" -Dpixtreme_infer_DIR="$CDA_INFER_CMAKE"
+cmake -S tests/native -B ../build/python-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE="$PWD/../build/native-sdk/bin/python" -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp;$CDA_SITE/nanobind/cmake"
 cmake --build ../build/python-tests -j2
-uv run pytest tests/test_import.py
-uv run pytest -m "gpu and not performance"
+uv run --no-sync pytest tests/test_import.py
+uv run --no-sync pytest -m "gpu and not performance"
 ```
 
 The import tests use a separate extension that registers overlapping C++ types
@@ -481,11 +491,12 @@ The default Conan profile is `cpp/conan/profiles/linux-gcc13`. Set the CMake
 cache variable `CDA_VSR_CONAN_PROFILE` to select a matching compiler profile, and
 `CDA_VSR_CONAN_CACHE` to an absolute path to select `core.cache:storage_path`.
 Use the same profile, package storage and `CONAN_HOME` for preparation and tests.
-For editable builds, pass these as `-Ccmake.define.CDA_VSR_CONAN_PROFILE=...` and
+For Python builds, pass these as `-Ccmake.define.CDA_VSR_CONAN_PROFILE=...` and
 `-Ccmake.define.CDA_VSR_CONAN_CACHE=...` to uv. Rebuild native edits with
-`uv sync --reinstall-package pixtreme-infer-cda-vsr -Cbuild.tool-args=-j8`.
+`uv pip install --no-deps --reinstall-package pixtreme-infer-cda-vsr . -Cbuild.tool-args=-j8`.
 
-The sdist includes native sources, recipes, profiles, lock and license notices;
+The sdist includes native sources, recipe acquisition and checksum verification,
+local recipes, profiles, lock and license notices;
 `uv build --sdist` followed by a wheel build from the extracted archive needs no
 Git checkout. Build release wheels in a manylinux
 environment, inspect them with `auditwheel show` and `readelf -d`, and retain
@@ -514,6 +525,14 @@ of `cpp/conan/profiles/linux-gcc14`, `CDA_VSR_CONAN_ARGS=--build=*`, and a writa
 installed by the isolated Python build; the image needs no preinstalled Conan.
 When `CONAN_HOME` is unset and HOME is unwritable, configuration uses a `home/`
 directory beneath the build's Conan output directory.
+`--build=*` packages the prebuilt SDKs without compiling their sources; CUDA
+runtime/CRT comes from the verified NVIDIA redistributables. Record both SDK
+versions from the build log and Conan graph, together with the wheel's runtime
+minimum versions. Each minimum must be at least the SDK version used to build.
+Before release, install the final wheel with pixtreme 2.17.0 and pixtreme-infer
+0.23.0 (the declared minima), and run the SDK, named-creation and ELF tests.
+Also build from the sdist alone in a fresh build directory and Conan home, with
+Git discovery disabled, and perform the same wheel checks.
 
 ## Versioning and release
 
@@ -523,8 +542,8 @@ at the repository root; tags with other prefixes do not affect it.
 Each version is distributed on PyPI as `pixtreme-infer-cda-vsr`. The same wheel and
 its `SHA256SUMS` file are also available in GitHub Releases. Declare dependencies
 on the PyPI distribution with a minimum version (`pixtreme-infer-cda-vsr>=X.Y.Z`).
-Use PyPI as the dependency source; GitHub Release assets and Git references are
-not dependency sources.
+Use PyPI for Python runtime dependencies. C and C++ builds acquire upstream SDKs
+through Conan from the public Release archives described above.
 
 ## License
 
