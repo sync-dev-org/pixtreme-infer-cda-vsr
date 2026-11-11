@@ -336,7 +336,7 @@ program linked against one major does not load a library of another major.
 
 ## Dependencies
 
-- Runtime dependencies are `pixtreme>=2.6.0`, `pixtreme-infer>=0.21.1`, `safetensors>=0.4`,
+- Runtime dependencies are `pixtreme>=2.14.0`, `pixtreme-infer>=0.21.2`, `safetensors>=0.4`,
   `tensoracle>=2.1.2`, and the TensorRT runtime `tensorrt-cu13>=11,<12` that tensoracle uses.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
@@ -360,10 +360,11 @@ uv run mypy
 uv build --wheel
 ```
 
-`uv sync` obtains build dependencies from Python wheels, including CUDA headers.
-The TensorRT headers used by the native network are checked against the source
-manifest during CMake configuration. No OS-installed CUDA toolkit or TensorRT SDK
-is needed. Editable installation preserves the namespace initializers supplied
+`uv sync` installs the pinned Conan CLI from the build requirements. Before CMake
+configures the compiler, Conan resolves the locked CUDA runtime/CRT and TensorRT
+headers. The repository recipes verify NVIDIA downloads against their SHA-256
+manifests. No OS-installed CUDA toolkit or TensorRT SDK is needed. Companion
+libraries and nanobind continue to come from Python wheels. Editable installation preserves the namespace initializers supplied
 by pixtreme and pixtreme-infer. The build generates `_native.pyi` from the
 compiled module; editable installation places it in `src/pixtreme/infer/cda_vsr/`,
 where Git ignores it.
@@ -374,16 +375,21 @@ Python or require nanobind:
 
 ```console
 uv venv ../build/native-sdk
-uv pip install --python ../build/native-sdk/bin/python 'tensoracle>=2.1.2' 'pixtreme-infer>=0.21.1' 'pixtreme>=2.6.0' 'nvidia-cuda-runtime>=13.2' 'nvidia-cuda-crt>=13.2' 'nanobind>=2.4'
+uv pip install --python ../build/native-sdk/bin/python 'tensoracle>=2.1.2' 'pixtreme-infer>=0.21.2' 'pixtreme>=2.14.0' 'nanobind>=2.4'
 CDA_SITE=$(../build/native-sdk/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
 CDA_INFER_CMAKE=$(../build/native-sdk/bin/python -c 'import pixtreme.infer; print(pixtreme.infer.get_cmake_dir())')
-cmake -S ../cpp -B ../build/cpp -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp" -Dpixtreme_infer_DIR="$CDA_INFER_CMAKE" -DCUDAToolkit_ROOT="$CDA_SITE/nvidia/cu13"
+uv tool install "$(.venv/bin/python -c 'import tomllib; print(next(r for r in tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"] if r.startswith("conan==")))')"
+cmake -P ../cpp/conan/prepare-tests.cmake
+cmake -S ../cpp -B ../build/cpp -G Ninja -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp" -Dpixtreme_infer_DIR="$CDA_INFER_CMAKE"
 cmake --build ../build/cpp -j2
 ctest --test-dir ../build/cpp --output-on-failure -LE gpu
 ```
 
-Catch2 is fetched at its recorded commit only when C++ tests are enabled. GPU
-CTest cases have the `gpu` label. The lifecycle case and the C entry's GPU cases
+The preparation command installs the locked CUDA, TensorRT headers and Catch2
+packages. C++ test configuration and Python native helper configuration use only
+prepared packages (`--no-remote --build=never`) and never export recipes. Missing
+dependencies fail configuration with the preparation command. GPU CTest cases
+have the `gpu` label. The lifecycle case and the C entry's GPU cases
 take the documented ×2 `params_ema` safetensors checkpoint through
 `PIXTREME_CDA_VSR_CHECKPOINT`; the C entry's GPU cases add the residual-unit
 metadata to a temporary copy and keep their engines under the build directory.
@@ -396,7 +402,7 @@ installed CMake package, which needs CMake and C and C++ compilers and is skippe
 when they are absent:
 
 ```console
-cmake -S tests/native -B ../build/python-tests -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE="$PWD/../build/native-sdk/bin/python" -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp;$CDA_SITE/nanobind/cmake" -Dpixtreme_infer_DIR="$CDA_INFER_CMAKE" -DCUDAToolkit_ROOT="$CDA_SITE/nvidia/cu13"
+cmake -S tests/native -B ../build/python-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE="$PWD/../build/native-sdk/bin/python" -DCMAKE_PREFIX_PATH="$CDA_SITE/tensoracle/cpp;$CDA_SITE/nanobind/cmake" -Dpixtreme_infer_DIR="$CDA_INFER_CMAKE"
 cmake --build ../build/python-tests -j2
 uv run pytest tests/test_import.py
 uv run pytest -m "gpu and not performance"
@@ -407,7 +413,17 @@ and check both import orders without a GPU. The import tests and the checkpoint
 inspection tests skip with a build instruction when the helpers are absent. The
 helpers are excluded from the wheel.
 
-Build release wheels in a manylinux
+The default Conan profile is `cpp/conan/profiles/linux-gcc13`. Set the CMake
+cache variable `CDA_VSR_CONAN_PROFILE` to select a matching compiler profile, and
+`CDA_VSR_CONAN_CACHE` to an absolute path to select `core.cache:storage_path`.
+Use the same profile, package storage and `CONAN_HOME` for preparation and tests.
+For editable builds, pass these as `-Ccmake.define.CDA_VSR_CONAN_PROFILE=...` and
+`-Ccmake.define.CDA_VSR_CONAN_CACHE=...` to uv. Rebuild native edits with
+`uv sync --reinstall-package pixtreme-infer-cda-vsr -Cbuild.tool-args=-j8`.
+
+The sdist includes native sources, recipes, profiles, lock and license notices;
+`uv build --sdist` followed by a wheel build from the extracted archive needs no
+Git checkout. Build release wheels in a manylinux
 environment, inspect them with `auditwheel show` and `readelf -d`, and retain
 pixtreme, pixtreme-infer and tensoracle as external wheel dependencies when applying the platform tag:
 
@@ -424,6 +440,13 @@ The extension uses `$ORIGIN/lib` for this module's C entry library,
 `$ORIGIN/../../../../tensoracle/cpp/lib` for the same libraries. Libraries supplied by those
 wheels, TensorRT and the NVIDIA driver are not copied into this wheel; the wheel
 contains only the versioned file `libpixtreme_infer_cda_vsr.so.1` of its own library.
+
+For the GCC 14 manylinux image, set `CDA_VSR_CONAN_PROFILE` to the absolute path
+of `cpp/conan/profiles/linux-gcc14`, `CDA_VSR_CONAN_ARGS=--build=*`, and a writable
+`CONAN_HOME` and `CDA_VSR_CONAN_CACHE` in the container environment. Conan is
+installed by the isolated Python build; the image needs no preinstalled Conan.
+When `CONAN_HOME` is unset and HOME is unwritable, configuration uses a `home/`
+directory beneath the build's Conan output directory.
 
 ## Versioning and release
 
