@@ -320,6 +320,70 @@ The Frame, NDArray, stream and reset requirements of the Python section above
 apply unchanged. Keep the module library loaded until every model handle is
 destroyed; linking the CMake target does this.
 
+### Create by module name
+
+With pixtreme-infer 0.22.0 or newer, C and C++ programs can create CDA-VSR by
+the module name `cda_vsr`, using only the core header and linking
+`pixtreme_infer::pixtreme_infer`. Install this module's wheel alongside core.
+The core finds `cda_vsr/lib/libpixtreme_infer_cda_vsr_entry.so` relative to its
+own library and keeps it loaded for the process lifetime. The entry library
+uses the same `libpixtreme_infer_cda_vsr.so.1` as the Python binding.
+
+```c
+#include <pixtreme/infer/core.h>
+
+pixtreme_infer_option_t weights = PIXTREME_INFER_OPTION_INIT;
+pixtreme_infer_option_t precision = PIXTREME_INFER_OPTION_INIT;
+pixtreme_infer_option_t height = PIXTREME_INFER_OPTION_INIT;
+pixtreme_infer_option_t width = PIXTREME_INFER_OPTION_INIT;
+weights.name = "weights"; weights.value = "/path/to/checkpoints/best-inference.safetensors";
+precision.name = "precision"; precision.value = "fp16";
+height.name = "input_height"; height.value = "270";
+width.name = "input_width"; width.value = "480";
+const pixtreme_infer_option_t *options[] = {&weights, &precision, &height, &width};
+pixtreme_infer_model_t *model = NULL;
+pixtreme_infer_error_t *error = NULL;
+pixtreme_infer_status_t status = pixtreme_infer_model_create_by_name(
+    "cda_vsr", options, sizeof options / sizeof options[0], &model, &error);
+/* Check status, then prepare, run, close and destroy through core as above.
+ * On failure model is NULL; inspect and destroy error when it is non-NULL. */
+```
+
+```cpp
+#include <pixtreme/infer/core.hpp>
+
+auto model = pixtreme::infer::Model::create_by_name("cda_vsr", {
+    {"weights", "/path/to/checkpoints/best-inference.safetensors"},
+    {"precision", "fp16"}, {"input_height", "270"}, {"input_width", "480"},
+    {"use_cuda_graph", "true"}});
+model.prepare(&prepare);
+auto output = model.run(frame, {{"mv", mv}, {"residual", residual}}, stream);
+model.close();
+```
+
+All option values are strings. This module accepts these keys:
+
+| Key | Accepted value | Required/default |
+| --- | --- | --- |
+| `weights` | Nonempty path to a compatible CDA-VSR safetensors checkpoint; relative paths use the process working directory | Required |
+| `precision` | `fp32` or `fp16` | Required |
+| `input_height` | Positive decimal integer representable by `int64_t` | Required |
+| `input_width` | Positive decimal integer representable by `int64_t` | Required |
+| `use_cuda_graph` | `true` or `false` | Defaults to `false` |
+
+CDA-VSR rejects `int8` and `fp8`. Unknown, duplicate, missing and invalid options
+return `PIXTREME_INFER_INVALID_ARGUMENT`; diagnostics identify the key and do not
+include option values. An incompatible or unreadable checkpoint is reported
+under `weights`. Options are borrowed only for the creation call. Each successful
+call owns an independent model. The existing module-specific C/C++ constructors
+and Python `Model(checkpoint=...)` keep their arguments and diagnostics.
+
+Preparation, inference and release can run on a thread whose current device
+differs from the model's device. Core selects the model's device during the
+operation and restores the caller's device and context before returning.
+Input frames, arrays and the non-blocking stream still belong to the model's
+device, and callers finish pending stream work before releasing resources.
+
 ### C ABI version
 
 This module's C ABI has its own version, `PIXTREME_INFER_CDA_VSR_ABI_MAJOR` and
@@ -336,7 +400,7 @@ program linked against one major does not load a library of another major.
 
 ## Dependencies
 
-- Runtime dependencies are `pixtreme>=2.14.0`, `pixtreme-infer>=0.21.2`, `safetensors>=0.4`,
+- Runtime dependencies are `pixtreme>=2.14.0`, `pixtreme-infer>=0.22.0`, `safetensors>=0.4`,
   `tensoracle>=2.1.2`, and the TensorRT runtime `tensorrt-cu13>=11,<12` that tensoracle uses.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
@@ -375,7 +439,7 @@ Python or require nanobind:
 
 ```console
 uv venv ../build/native-sdk
-uv pip install --python ../build/native-sdk/bin/python 'tensoracle>=2.1.2' 'pixtreme-infer>=0.21.2' 'pixtreme>=2.14.0' 'nanobind>=2.4'
+uv pip install --python ../build/native-sdk/bin/python 'tensoracle>=2.1.2' 'pixtreme-infer>=0.22.0' 'pixtreme>=2.14.0' 'nanobind>=2.4'
 CDA_SITE=$(../build/native-sdk/bin/python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
 CDA_INFER_CMAKE=$(../build/native-sdk/bin/python -c 'import pixtreme.infer; print(pixtreme.infer.get_cmake_dir())')
 uv tool install "$(.venv/bin/python -c 'import tomllib; print(next(r for r in tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"] if r.startswith("conan==")))')"
@@ -438,8 +502,11 @@ The extension uses `$ORIGIN/lib` for this module's C entry library,
 `$ORIGIN/../../../tensoracle/cpp/lib` for tensoracle. The C entry library in
 `lib/` uses `$ORIGIN/../../lib`, `$ORIGIN/../../../core/lib` and
 `$ORIGIN/../../../../tensoracle/cpp/lib` for the same libraries. Libraries supplied by those
-wheels, TensorRT and the NVIDIA driver are not copied into this wheel; the wheel
-contains only the versioned file `libpixtreme_infer_cda_vsr.so.1` of its own library.
+wheels, TensorRT and the NVIDIA driver are not copied into this wheel. Its module
+library uses the versioned file `libpixtreme_infer_cda_vsr.so.1`; the adjacent
+`libpixtreme_infer_cda_vsr_entry.so` exports only `pixtreme_infer_module_entry`,
+has RUNPATH `$ORIGIN`, and lists the module library in `NEEDED`. Inspect that entry
+with `readelf -d` and `readelf --dyn-syms`, including in a wheel built from the sdist.
 
 For the GCC 14 manylinux image, set `CDA_VSR_CONAN_PROFILE` to the absolute path
 of `cpp/conan/profiles/linux-gcc14`, `CDA_VSR_CONAN_ARGS=--build=*`, and a writable
