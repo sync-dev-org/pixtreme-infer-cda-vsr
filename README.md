@@ -630,6 +630,7 @@ Pass these CMake cache values when configuring a source build:
 | `CMAKE_BUILD_TYPE` | `Release`, matching the Conan profile |
 | `CUDAToolkit_ROOT` | CUDA package root containing `include/cuda_runtime_api.h` and `lib/libcudart_static.a`; the consumer recipe sets it from `user.cuda:root` |
 | `SKBUILD_PROJECT_VERSION` | Distribution version, such as `0.16.3`; defaults to `0.0.0` outside a wheel build |
+| `BUILD_SHARED_LIBS` | `ON` (default) for shared libraries; `OFF` for the static module library. Conan CMakeToolchain sets this from the recipe's `shared` option |
 | `BUILD_TESTING` | `OFF` for packaging; `ON` adds the standalone C++ tests |
 | `CMAKE_INSTALL_PREFIX` | Destination prefix, shared by the dependency SDKs at runtime |
 
@@ -654,6 +655,42 @@ to `--as-needed` can use `CMAKE_SHARED_LINKER_FLAGS=-Wl,--no-as-needed` for that
 comparison. Runtime use and executable linking still need the host's TensorRT
 runtime as described below.
 
+To build the static form from source, use the same inputs with
+`-DBUILD_SHARED_LIBS=OFF`:
+
+```console
+cmake -S cpp -B build/sdk-static -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF \
+  -DCMAKE_TOOLCHAIN_FILE=/path/to/generators/conan_toolchain.cmake \
+  -DCUDAToolkit_ROOT=/path/to/cuda-package -DSKBUILD_PROJECT_VERSION=X.Y.Z
+cmake --build build/sdk-static --parallel 2
+cmake --install build/sdk-static --prefix /path/to/static-prefix
+```
+
+This installs `libpixtreme_infer_cda_vsr.a`, the public headers and the CMake
+package. Both forms use the single link target
+`pixtreme_infer_cda_vsr::pixtreme_infer_cda_vsr`. In the static form, the target
+passes `PIXTREME_INFER_CDA_VSR_STATIC` to consumers so the public header does not
+use DLL import or export declarations. Use the headers and static library from
+the same version.
+
+The static archive contains only this module's objects; pixtreme, pixtreme-infer,
+tensoracle and CUDA runtime objects remain external. The consuming executable
+or library resolves those dependencies at its own link step, including the static
+CUDA runtime. Set `CUDAToolkit_ROOT` to the consumer's CUDA Toolkit or Conan CUDA
+package when configuring the installed static target. CMake discovers
+`CUDA::cudart_static` there without retaining build-host paths.
+
+A process must contain one instance of this module, shared by all its code. If an
+executable or library incorporates the static module, that artifact must be the
+only provider of this module in the process: do not load another artifact that
+incorporates it, or load this module's shared library in that process. The static
+form has no `pixtreme_infer_module_entry` function or entry shared library. Create
+models with `pixtreme_infer_cda_vsr_model_create`, and use the core C functions to
+prepare, run, close and destroy them. Python wheel builds always use the shared
+form. The public SDK archive and wheel contain only shared libraries; the static
+form is built from source.
+
 ### Use the packaged SDK
 
 Each GitHub Release provides the native SDK alongside the wheel and `SHA256SUMS`.
@@ -671,7 +708,11 @@ through the organization's authenticated recipe workflow, verifying the archive'
 `SHA256SUMS` and the locked revisions. With the default `from_source=False`, the
 module recipe downloads and unpacks the public SDK. Versions supporting
 `from_source=True` can instead build the native source using the inputs above;
-both forms preserve the same SDK layout and C ABI.
+both acquisition methods preserve the shared SDK layout and C ABI.
+Conan's static form is available from the organization's recipe version that adds
+support for `from_source=True` together with `shared=False`. A prebuilt SDK does
+not provide a static library; requesting `shared=False` with `from_source=False`
+is rejected with an instruction to build from source.
 
 The consumer's `conanfile.txt` can require the module by a lower bound. Replace
 `X.Y.Z` with a module version available in the recipe catalog:
@@ -684,9 +725,10 @@ pixtreme-infer-cda-vsr/[>=X.Y.Z]
 CMakeToolchain
 ```
 
-The module recipe requires pixtreme, pixtreme-infer and tensoracle with
-`shared=True`. Each minimum version comes from the SDK version in the module's
-build lock; no upper bound is imposed. Run
+The recipe's shared form requires pixtreme, pixtreme-infer and tensoracle with
+`shared=True`; the static form leaves their linkage selection to the consumer,
+under each dependency's own linkage rules. Each minimum version comes from the
+SDK version in the module's build lock; no upper bound is imposed. Run
 `conan install . --output-folder build --build=missing` with your Conan profile,
 then configure CMake with `-DCMAKE_TOOLCHAIN_FILE="$PWD/build/conan_toolchain.cmake"`
 and `-DCMAKE_BUILD_TYPE=Release`. CMake uses the SDK's own package:
