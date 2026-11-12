@@ -538,6 +538,14 @@ Global uv `-C` settings also reach dependency sdist builds, where changing a
 build path creates separate uv cache entries. Use the environment variables
 above to avoid passing these settings through uv's dependency build cache keys.
 
+For the entry library's dependency regression check on Linux, build with
+`SKBUILD_CMAKE_DEFINE='CMAKE_SHARED_LINKER_FLAGS=-Wl,--no-as-needed'` on the
+`uv pip install --no-deps --reinstall-package pixtreme-infer-cda-vsr .` command,
+then run `uv run --no-sync pytest tests/test_c_entry.py tests/test_named_entry.py`.
+This retains unused link dependencies as the release linker does, so the ELF
+check detects an entry that directly requires tensoracle despite its `$ORIGIN`
+RUNPATH. The installed CMake target still supplies tensoracle to SDK consumers.
+
 The sdist includes native sources, profiles, lock and license notices.
 `uv build --sdist` uses the same acquisition and export checks to copy the locked
 `cuda-toolkit`, `tensorrt`, `tensoracle`, `pixtreme` and `pixtreme-infer` recipes and their notices
