@@ -250,8 +250,10 @@ The wheel also contains a native SDK under `pixtreme/infer/cda_vsr/`: the shared
 library `lib/libpixtreme_infer_cda_vsr.so.1`, the C header
 `include/pixtreme/infer/cda_vsr.h`, the header-only C++ wrapper
 `include/pixtreme/infer/cda_vsr.hpp` and the CMake package `pixtreme_infer_cda_vsr`
-in `lib/cmake/pixtreme_infer_cda_vsr/`. The package finds the pixtreme-infer
-package installed in the same environment; the shared library locates the
+in `lib/cmake/pixtreme_infer_cda_vsr/`. The package finds the pixtreme-infer and
+tensoracle packages installed in the same environment and supplies their link
+dependencies to consumers. Tensoracle's headers are not required by the public
+C and C++ headers. The shared library locates the
 pixtreme, pixtreme-infer and tensoracle libraries of the installed wheels. The
 Python `Model` is a binding of the same C++ wrapper.
 
@@ -624,6 +626,10 @@ then configure CMake with `-DCMAKE_TOOLCHAIN_FILE="$PWD/build/conan_toolchain.cm
 and `-DCMAKE_BUILD_TYPE=Release`. CMake uses the SDK's own package:
 `find_package(pixtreme_infer_cda_vsr CONFIG REQUIRED)` and
 `pixtreme_infer_cda_vsr::pixtreme_infer_cda_vsr` as the link target.
+The package finds its dependencies through the toolchain's `CMAKE_PREFIX_PATH`
+and supplies tensoracle to the executable's linker even when the SDKs occupy
+separate package folders. Linking needs no Conan run environment or additional
+linker options.
 
 The module archive does not bundle pixtreme, core or tensoracle.
 CUDA runtime remains statically linked. TensorRT libraries and headers are not
