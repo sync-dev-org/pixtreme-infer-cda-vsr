@@ -402,7 +402,7 @@ program linked against one major does not load a library of another major.
 
 ## Dependencies
 
-- Runtime dependencies are `pixtreme>=2.17.0`, `pixtreme-infer>=0.23.0`, `safetensors>=0.4`,
+- Runtime dependencies are `pixtreme>=2.19.0`, `pixtreme-infer>=0.23.0`, `safetensors>=0.4`,
   `tensoracle>=2.1.2`, and the TensorRT runtime `tensorrt-cu13>=11.2,<12` that tensoracle uses.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
@@ -496,9 +496,16 @@ metadata to a temporary copy and keep their engines under the build directory.
 Python tests use native helpers for import compatibility, the C++ checkpoint
 inspection, direct access to the module's TensorRT engines, and small GPU test
 networks. Build the helpers before running pytest. Test execution does not
-download code; the only code it builds is a small C and C++ consumer of the
-installed CMake package, which needs CMake and C and C++ compilers and is skipped
-when they are absent:
+download code. Pytest builds small C and C++ consumers of the installed CMake
+package, which require CMake and C and C++ compilers. It also builds and installs
+the module's standalone native SDK in `tests/test_native_install.py`; these tests
+require CMake, Ninja, Conan, a C++ compiler and `readelf` from binutils. Tests skip
+with instructions when their required tools are unavailable. Before running the
+native SDK tests, prepare the Conan packages with `cpp/conan/prepare-tests.cmake`
+as shown above. These tests use only prepared packages; missing packages fail
+configuration with the preparation command.
+
+Build the native helpers as follows:
 
 ```console
 uv venv ../build/native-tools
@@ -600,6 +607,55 @@ Git discovery disabled, and perform the same wheel checks.
 
 ## C and C++ SDK through Conan
 
+### Build the native SDK from source
+
+The CMake entry point is `cpp/`. A caller can supply a Conan-generated
+`CMakeToolchain` and `CMakeDeps` configuration; the bootstrap then keeps that
+toolchain and does not invoke Conan again. Without an external toolchain, the
+development and wheel builds prepare their dependencies as described above.
+
+The build inputs in `cpp/conanfile.py` are `pixtreme/[>=2.19.0]`,
+`pixtreme-infer/[>=0.23.0]` and `tensoracle/[>=2.1.2]` with `shared=True`, plus
+`tensorrt/11.2.1.2` with `tensorrt/*:headers_only=True`. The build tool requirement
+is `cuda-toolkit/13.2.2` with `compiler=False`; enabling tests also requires
+`catch2/3.16.1`. Use a C++17 compiler, CMake 3.26 or newer, Ninja and the Conan CLI
+version declared in `python/pyproject.toml`. Compiling and installing the native
+SDK requires neither Python bindings nor a GPU.
+
+Pass these CMake cache values when configuring a source build:
+
+| Variable | Value |
+| --- | --- |
+| `CMAKE_TOOLCHAIN_FILE` | Absolute path to the caller's `conan_toolchain.cmake` |
+| `CMAKE_BUILD_TYPE` | `Release`, matching the Conan profile |
+| `CUDAToolkit_ROOT` | CUDA package root containing `include/cuda_runtime_api.h` and `lib/libcudart_static.a`; the consumer recipe sets it from `user.cuda:root` |
+| `SKBUILD_PROJECT_VERSION` | Distribution version, such as `0.16.3`; defaults to `0.0.0` outside a wheel build |
+| `BUILD_TESTING` | `OFF` for packaging; `ON` adds the standalone C++ tests |
+| `CMAKE_INSTALL_PREFIX` | Destination prefix, shared by the dependency SDKs at runtime |
+
+```console
+cmake -S cpp -B build/sdk -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_TOOLCHAIN_FILE=/path/to/generators/conan_toolchain.cmake \
+  -DCUDAToolkit_ROOT=/path/to/cuda-package \
+  -DSKBUILD_PROJECT_VERSION=0.16.3 -DBUILD_TESTING=OFF
+cmake --build build/sdk --parallel 2
+cmake --install build/sdk --prefix /path/to/sdk-prefix
+```
+
+The native install places the public headers, four CMake package files and the
+two shared libraries under `pixtreme/infer/cda_vsr/`, matching the wheel's SDK.
+The main library's real filename and SONAME are `libpixtreme_infer_cda_vsr.so.1`.
+Its RUNPATH is
+`$ORIGIN/../../lib:$ORIGIN/../../../core/lib:$ORIGIN/../../../../tensoracle/cpp/lib`;
+the entry library's RUNPATH is `$ORIGIN`. The SDK does not install an unversioned
+linker symlink; consumers link the imported CMake target. Build with the same
+linker policy as the release when comparing `NEEDED` entries; a host that defaults
+to `--as-needed` can use `CMAKE_SHARED_LINKER_FLAGS=-Wl,--no-as-needed` for that
+comparison. Runtime use and executable linking still need the host's TensorRT
+runtime as described below.
+
+### Use the packaged SDK
+
 Each GitHub Release provides the native SDK alongside the wheel and `SHA256SUMS`.
 `pixtreme-infer-cda-vsr-sdk-X.Y.Z-manylinux_2_28_x86_64.tar.gz` contains the module's
 C header, header-only C++ wrapper, CMake package, `libpixtreme_infer_cda_vsr.so.1`
@@ -612,8 +668,10 @@ The module's Conan recipe is maintained in the organization's recipe repository.
 A release adds the SDK's URL and SHA256 to that recipe; the module's public
 Release does not carry a recipe archive. Acquire and export the selected recipes
 through the organization's authenticated recipe workflow, verifying the archive's
-`SHA256SUMS` and the locked revisions. The module recipe downloads and unpacks the
-public SDK without compiling the module or acquiring its source.
+`SHA256SUMS` and the locked revisions. With the default `from_source=False`, the
+module recipe downloads and unpacks the public SDK. Versions supporting
+`from_source=True` can instead build the native source using the inputs above;
+both forms preserve the same SDK layout and C ABI.
 
 The consumer's `conanfile.txt` can require the module by a lower bound. Replace
 `X.Y.Z` with a module version available in the recipe catalog:
