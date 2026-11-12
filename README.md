@@ -401,7 +401,7 @@ program linked against one major does not load a library of another major.
 ## Dependencies
 
 - Runtime dependencies are `pixtreme>=2.17.0`, `pixtreme-infer>=0.23.0`, `safetensors>=0.4`,
-  `tensoracle>=2.1.2`, and the TensorRT runtime `tensorrt-cu13>=11,<12` that tensoracle uses.
+  `tensoracle>=2.1.2`, and the TensorRT runtime `tensorrt-cu13>=11.2,<12` that tensoracle uses.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
   The `dev` dependency group installs `tensoracle[convert]` and PyTorch. The tests use
@@ -534,13 +534,141 @@ Before release, install the final wheel with pixtreme 2.17.0 and pixtreme-infer
 Also build from the sdist alone in a fresh build directory and Conan home, with
 Git discovery disabled, and perform the same wheel checks.
 
+## C and C++ SDK through Conan
+
+Starting with 0.15.1, each GitHub Release provides two native SDK assets alongside
+the wheel and `SHA256SUMS`:
+
+- `pixtreme-infer-cda-vsr-sdk-X.Y.Z-manylinux_2_28_x86_64.tar.gz` contains the module's
+  C header, header-only C++ wrapper, CMake package, `libpixtreme_infer_cda_vsr.so.1`
+  and `libpixtreme_infer_cda_vsr_entry.so`, under `pixtreme/infer/cda_vsr/`. These
+  files have the same bytes and relative paths as in the release wheel. License
+  notices are under `licenses/`; `sdk.json` records the version, platform, C ABI,
+  license expression, SDK URL, and wheel filename and SHA256.
+- `pixtreme-infer-cda-vsr-recipes-X.Y.Z.tar.gz` contains
+  `pixtreme-infer-cda-vsr/conanfile.py`, generated `conandata.yml` with the SDK URL
+  and SHA256, `recipes.json` and `LICENSE`. The recipe downloads and unpacks the
+  prebuilt SDK; it does not compile the module or acquire its source.
+
+Download the recipe archives and their checksum files from the public Releases
+over HTTPS, without GitHub authentication. For 0.15.1:
+
+```bash
+for item in pixtreme:2.17.0 pixtreme-infer:0.23.0 pixtreme-infer-cda-vsr:0.15.1; do
+    name=${item%:*}
+    version=${item#*:}
+    mkdir -p "$name-recipes"
+    (
+        cd "$name-recipes"
+        base="https://github.com/sync-dev-org/$name/releases/download/v$version"
+        curl -fLO "$base/$name-recipes-$version.tar.gz"
+        curl -fLO "$base/SHA256SUMS"
+        sha256sum --check --ignore-missing SHA256SUMS
+        tar -xzf "$name-recipes-$version.tar.gz"
+        conan export "$name"
+    ) || exit 1
+done
+```
+
+The consumer's `conanfile.txt` can require the module by a lower bound:
+
+```ini
+[requires]
+pixtreme-infer-cda-vsr/[>=0.15.1]
+
+[generators]
+CMakeToolchain
+```
+
+The module recipe requires `pixtreme/[>=2.17.0]` and
+`pixtreme-infer/[>=0.23.0]`, both with `shared=True`. Later releases derive these
+minimum versions from the SDK versions in their build's Conan lock. Run
+`conan install . --output-folder build --build=missing` with your Conan profile,
+then configure CMake with `-DCMAKE_TOOLCHAIN_FILE="$PWD/build/conan_toolchain.cmake"`
+and `-DCMAKE_BUILD_TYPE=Release`. CMake uses the SDK's own package:
+`find_package(pixtreme_infer_cda_vsr CONFIG REQUIRED)` and
+`pixtreme_infer_cda_vsr::pixtreme_infer_cda_vsr` as the link target.
+
+The 0.15.1 recipe does **not** require tensoracle, whose SDK and recipe are not
+yet available. It does not resolve all native runtime dependencies on its own.
+Supply `libtensoracle.so.2` separately, at `tensoracle/cpp/lib/` in a common
+runtime prefix. The module archive does not bundle pixtreme, core or tensoracle.
+CUDA runtime remains statically linked. TensorRT libraries and headers are not
+included or required by the recipe: the host must supply a TensorRT
+runtime 11.2 or later, below 12, for tensoracle. Do not copy TensorRT into the runtime prefix or add
+a TensorRT path to the module or entry library's RUNPATH.
+
+For a runtime independent of Python and Conan's run environment, copy the
+packages' `pixtreme/core/`, `pixtreme/infer/` and `pixtreme/infer/cda_vsr/`
+subtrees into one prefix, keeping their relative layout. Place tensoracle as
+described above, and let the executable find core through a relative RUNPATH
+(for example, `$ORIGIN/../pixtreme/infer/lib` for an executable under `bin/`).
+The entry finds the module with `$ORIGIN`; the module finds its upstream
+libraries through its unchanged wheel RUNPATH. Keep each package's `licenses/`
+and `sdk.json` separately when assembling a distribution to avoid overwriting
+another package's notices or identity.
+
+### Building and checking the archives
+
+From the checkout that built the verified release wheel, run:
+
+```console
+cd python
+uv run --no-sync python tools/build_sdk_archives.py <verified-wheel> --version X.Y.Z --base-url https://github.com/sync-dev-org/pixtreme-infer-cda-vsr/releases/download/vX.Y.Z --out-dir dist
+```
+
+Append the command's two SHA256 lines to the wheel's `SHA256SUMS` and publish all
+three assets with that manifest. The script rejects non-release or mismatched
+versions and names or contents forbidden by `noren-words.txt`. Archive ordering,
+timestamps and permissions are fixed so identical inputs produce identical bytes.
+
+For development tests, prepare one wheel and the upstream Release assets outside
+pytest. Run these commands from the repository root:
+
+```bash
+(cd python && uv build --wheel --out-dir ../build/sdk-release-inputs/module)
+for item in pixtreme:2.17.0 pixtreme-infer:0.23.0; do
+    name=${item%:*}
+    version=${item#*:}
+    dest="build/sdk-release-inputs/$name"
+    mkdir -p "$dest"
+    for file in "$name-sdk-$version-manylinux_2_28_x86_64.tar.gz" "$name-recipes-$version.tar.gz" SHA256SUMS; do
+        curl -fL "https://github.com/sync-dev-org/$name/releases/download/v$version/$file" -o "$dest/$file" || exit 1
+    done
+done
+# The prefix check needs an explicit host TensorRT input; the development test
+# can use the already installed tensorrt-cu13-libs native file directly.
+export PIXTREME_CDA_VSR_TENSORRT_LIBRARY="$(python/.venv/bin/python -c 'from importlib.metadata import distribution; print(distribution("tensorrt-cu13-libs").locate_file("tensorrt_libs/libnvinfer.so.11").resolve())')"
+(cd python && uv run --no-sync pytest tests/test_release_sdk_archives.py)
+```
+
+Keep only one wheel in the preparation directory. Tests give a temporary copy
+the release version 0.15.1 without changing its SDK bytes, verify upstream
+checksums, and export the actual recipes into a fresh Conan home with remotes
+disabled and SDK URLs pointing to local files. They check byte equality, ELF
+dependencies, reproducible archives, CMake linking, and model creation by name
+after moving the common prefix. The prefix test supplies tensoracle's native
+library from the development environment as a separate fixture; this is not
+Conan resolution or a tensoracle distribution procedure. It runs a C11 program
+without Python files or bindings, Python environment paths or Conan's run
+environment, and verifies the loaded library locations. Its C consumer first
+opens the explicit TensorRT input with `dlopen(RTLD_NOW | RTLD_GLOBAL)`; only
+TensorRT is loaded from that external directory. The other five libraries must
+come from the moved prefix. This fixture uses the development environment's
+`tensorrt-cu13-libs` native file, without copying it or importing Python. Set
+`PIXTREME_CDA_VSR_TENSORRT_LIBRARY` to an absolute path to `libnvinfer.so.11`;
+the prefix check skips with a reason when this input is absent. This explicit
+load belongs to the test consumer; it does not define the production host
+TensorRT discovery mechanism.
+
 ## Versioning and release
 
 The version is derived by setuptools-scm through scikit-build-core from tags of the form `vX.Y.Z`
 at the repository root; tags with other prefixes do not affect it.
 
 Each version is distributed on PyPI as `pixtreme-infer-cda-vsr`. The same wheel and
-its `SHA256SUMS` file are also available in GitHub Releases. Declare dependencies
+the native SDK and recipe archives, and their `SHA256SUMS` file are also available
+in GitHub Releases. Declare dependencies
 on the PyPI distribution with a minimum version (`pixtreme-infer-cda-vsr>=X.Y.Z`).
 Use PyPI for Python runtime dependencies. C and C++ builds acquire upstream SDKs
 through Conan from the public Release archives described above.
