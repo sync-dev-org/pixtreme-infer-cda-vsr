@@ -14,7 +14,17 @@ and `pixtreme/infer/__init__.py` by
 ## Installation
 
 Use Linux x86_64 with CPython 3.12 or later and an NVIDIA GPU and driver compatible
-with CUDA 13. Install the distribution from PyPI:
+with CUDA 13. Register NVIDIA's CUDA apt repository for your Linux distribution,
+then install the TensorRT 11 runtime on the host:
+
+```console
+sudo apt-get update
+sudo apt-get install libnvinfer11
+```
+
+The module is built with TensorRT 11.2.1.2 headers. Supply a TensorRT runtime
+at least that version and below 12 through the host's normal library search path.
+Install the distribution from PyPI:
 
 ```console
 pip install pixtreme-infer-cda-vsr
@@ -29,6 +39,10 @@ uv add pixtreme-infer-cda-vsr
 The Linux wheel includes the compiled module; installation and inference do not
 require a compiler or a TensorRT SDK. Engine construction and execution use
 tensoracle's separately installed native library.
+
+This module does not declare a pip TensorRT dependency or a TensorRT extra.
+To use pip-provided TensorRT, install tensoracle's TensorRT extra following
+[tensoracle's installation instructions](https://github.com/sync-dev-org/tensoracle).
 
 The wheel also contains the PEP 561 marker `py.typed` and `_native.pyi`, a stub
 that nanobind generates from the compiled module during the build, so IDEs and
@@ -172,8 +186,8 @@ rejected before the checkpoint is read.
 
 ## Prepare the engine cache
 
-Installing this module installs tensoracle and the TensorRT runtime it uses. Building
-an engine on a cache miss and opening a cached engine both need a compatible NVIDIA
+Installing this module installs tensoracle; the host supplies the TensorRT runtime
+as described in Installation. Building an engine on a cache miss and opening a cached engine both need a compatible NVIDIA
 GPU; neither imports PyTorch. A checkpoint that fails validation does not leave an
 engine in the cache.
 
@@ -265,8 +279,17 @@ target_link_libraries(app PRIVATE pixtreme_infer_cda_vsr::pixtreme_infer_cda_vsr
 
 ```console
 SITE=$(python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
-cmake -S . -B build -Dpixtreme_infer_cda_vsr_DIR="$SITE/pixtreme/infer/cda_vsr/lib/cmake/pixtreme_infer_cda_vsr"
+cmake -S . -B build \
+  -Dpixtreme_infer_cda_vsr_DIR="$SITE/pixtreme/infer/cda_vsr/lib/cmake/pixtreme_infer_cda_vsr"
 ```
+
+The package loads tensoracle's CMake package, which needs the TensorRT runtime
+location at configure time. CMake finds apt's system runtime through its normal
+library search. For a runtime installed elsewhere, set `TENSORRT_ROOT` to that
+installation directory.
+For an individual library file, set `TENSORACLE_TENSORRT_LIBRARY` to its full path
+instead. An existing `TensorRT::nvinfer` target also supplies that location.
+The module SDK does not include TensorRT.
 
 `pixtreme_infer_cda_vsr_model_create` takes the same values as the Python
 constructor and returns a pixtreme-infer core model handle. Prepare, run, close
@@ -324,7 +347,7 @@ destroyed; linking the CMake target does this.
 
 ### Create by module name
 
-With pixtreme-infer 0.22.0 or newer, C and C++ programs can create CDA-VSR by
+With pixtreme-infer 0.24.0 or newer, C and C++ programs can create CDA-VSR by
 the module name `cda_vsr`, using only the core header and linking
 `pixtreme_infer::pixtreme_infer`. Install this module's wheel alongside core.
 The core finds `cda_vsr/lib/libpixtreme_infer_cda_vsr_entry.so` relative to its
@@ -386,10 +409,55 @@ operation and restores the caller's device and context before returning.
 Input frames, arrays and the non-blocking stream still belong to the model's
 device, and callers finish pending stream work before releasing resources.
 
+### Query the family and register an embedded module
+
+Core 0.24.0 can query the family without creating a model, reading a checkpoint,
+initializing CUDA, creating a context or allocating GPU memory. CDA-VSR's family
+is independent of its settings, so no keys are required for this query. Supplied
+keys still undergo the same name, duplicate, type and range checks as creation;
+a supplied `weights` path is checked for nonempty text without opening the file.
+The returned family retains symbolic `H` and `W` dimensions and equals the family
+of a model created with the same settings. Query success does not guarantee that
+creation or preparation will succeed.
+
+```c
+#include <pixtreme/infer/core.h>
+
+pixtreme_infer_family_t *family = NULL;
+pixtreme_infer_error_t *error = NULL;
+pixtreme_infer_status_t status = pixtreme_infer_family_query_by_name(
+    "cda_vsr", NULL, 0, &family, &error);
+/* Check status; family_get_desc borrows the declaration until family_destroy. */
+pixtreme_infer_family_destroy(family);
+```
+
+The C++ equivalent is `pixtreme::infer::Family::query_by_name("cda_vsr", {})`;
+its `desc()` borrows the declaration and its destructor releases the family.
+
+When embedding the static module, link the module's CMake target and register its
+entry before any named creation or family query in the process:
+
+```c
+#include <pixtreme/infer/cda_vsr.h>
+
+const pixtreme_infer_module_entry_t *entries[] = {
+    pixtreme_infer_module_entry_cda_vsr()
+};
+pixtreme_infer_error_t *error = NULL;
+pixtreme_infer_status_t status = pixtreme_infer_module_entries_set(entries, 1, &error);
+/* Check status, then query or create by name "cda_vsr" as above. */
+```
+
+The module provides this C entry in both library forms. Core accepts the complete
+entry list once per process and retains it until process exit. Include all embedded
+modules in that list. The existing module-specific creation function remains
+available. Each queried family belongs to its caller and is independent of any
+model and of other queried families.
+
 ### C ABI version
 
 This module's C ABI has its own version, `PIXTREME_INFER_CDA_VSR_ABI_MAJOR` and
-`PIXTREME_INFER_CDA_VSR_ABI_MINOR` in `cda_vsr.h` (currently 1.0). It is
+`PIXTREME_INFER_CDA_VSR_ABI_MINOR` in `cda_vsr.h` (currently 1.1). It is
 independent of the distribution version and of pixtreme-infer's core C ABI.
 `pixtreme_infer_cda_vsr_abi_version` reports the loaded library's version, and
 `pixtreme_infer_cda_vsr_check_abi` returns `PIXTREME_INFER_INCOMPATIBLE_ABI`
@@ -402,11 +470,12 @@ program linked against one major does not load a library of another major.
 
 ## Dependencies
 
-- Runtime dependencies are `pixtreme>=2.19.0`, `pixtreme-infer>=0.23.0`, `safetensors>=0.4`,
-  `tensoracle>=2.1.2`, and the TensorRT runtime `tensorrt-cu13>=11.2,<12` that tensoracle uses.
+- Runtime dependencies are `pixtreme>=2.19.0`, `pixtreme-infer>=0.24.0`, `safetensors>=0.4`,
+  and `tensoracle>=2.1.2`. The host supplies the TensorRT runtime through apt.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
-  The `dev` dependency group installs `tensoracle[convert]` and PyTorch. The tests use
+  The `dev` dependency group installs `tensoracle[convert]`, PyTorch, and
+  `tensorrt-cu13>=11.2,<12` for the test helpers' TensorRT Python bindings and runtime. The tests use
   PyTorch to convert the public checkpoint, to compute reference values, and to run
   TensorRT engines on the GPU. The development environment takes PyTorch from the
   PyTorch `cu132` index (CUDA 13.2); the distributed wheel does not depend on PyTorch.
@@ -430,7 +499,7 @@ uv build --wheel
 The isolated wheel build installs the pinned Conan CLI from the build requirements.
 Before CMake configures the compiler, the bootstrap acquires the locked
 `cuda-toolkit`, `tensorrt`, `tensoracle`, `pixtreme` and `pixtreme-infer` recipes
-from one archive in the organization's private Conan recipe repository.
+from the `v1.12.0` archive in the organization's private Conan recipe repository.
 A checkout build requires the organization's GitHub authentication. The bootstrap
 uses the host's `gh` authentication in a temporary Conan home, removes the
 credential immediately after acquisition, and verifies `SHA256SUMS` and every
@@ -442,20 +511,22 @@ recipe copies and needs no GitHub login.
 CUDA runtime/CRT comes from `cuda-toolkit/13.2.2` with `compiler=False`;
 TensorRT headers come from `tensorrt/11.2.1.2` with `headers_only=True`;
 tensoracle's SDK comes from `tensoracle/[>=2.1.2]` with `shared=True`, locked to
-2.2.1. Pixtreme is locked to 2.19.0 and pixtreme-infer to 0.23.0, both with
+2.3.0. Pixtreme is locked to 2.19.0 and pixtreme-infer to 0.24.0, both with
 `shared=True`.
 
 No OS-installed CUDA toolkit or TensorRT SDK is needed. CUDA headers are supplied
 separately from `TensorRT::headers`. The consumer sets `tensorrt/*:headers_only=True`
-for the entire dependency graph, including tensoracle's requirement. Nanobind
+for its direct TensorRT requirement. Tensoracle's SDK recipe does not require
+TensorRT; the host supplies its runtime. Nanobind
 comes from a wheel in the build's Python environment. The header-only
 TensorRT package uses the OSS Apache-2.0 license, whose bytes match the notice in
 `python/licenses/tensorrt-headers.txt`; the wheel does not include TensorRT's
 proprietary runtime.
 
 The isolated wheel build installs `tensorrt-cu13>=11.2,<12` from its build
-requirements. Stub generation loads the Conan tensoracle library and receives
-the isolated environment's TensorRT runtime directory through `LD_LIBRARY_PATH`
+requirements. Configuration supplies the isolated environment's TensorRT runtime
+directory to tensoracle's CMake package through `TENSORRT_ROOT`. Stub generation
+loads the Conan tensoracle library and receives that directory through `LD_LIBRARY_PATH`
 for that command only. A wheel build needs no preinstalled TensorRT runtime on its
 host or container. The module's RUNPATH does not include TensorRT, and its wheel
 and SDK do not bundle the TensorRT runtime.
@@ -472,12 +543,16 @@ Conan supplies the pixtreme, pixtreme-infer and tensoracle SDKs for standalone
 C++ tests. The host must expose a compatible `libnvinfer.so.11` through its system
 loader or `LD_LIBRARY_PATH` for linking and running those tests and the Python
 native helpers. The following development commands use the TensorRT runtime
-already installed by `uv sync`. The `cpp/` configuration and tests do not invoke
+installed by `uv sync --group dev`. Set `TENSORRT_ROOT` to that runtime directory at
+configure time so tensoracle's CMake package can resolve its link dependency; the
+relocated SDK consumer tests read the same variable. With apt's system runtime,
+CMake uses its normal library search instead. The `cpp/` configuration and tests do not invoke
 Python or require nanobind:
 
 ```console
 uv tool install "$(.venv/bin/python -c 'import tomllib; print(next(r for r in tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"] if r.startswith("conan==")))')"
 CDA_TENSORRT_RUNTIME=$(.venv/bin/python -c 'from importlib.metadata import distribution; print(distribution("tensorrt-cu13-libs").locate_file("tensorrt_libs").resolve())')
+export TENSORRT_ROOT="$CDA_TENSORRT_RUNTIME"
 cmake -P ../cpp/conan/prepare-tests.cmake
 cmake -S ../cpp -B ../build/cpp -G Ninja -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
 LD_LIBRARY_PATH="$CDA_TENSORRT_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" cmake --build ../build/cpp -j2
@@ -601,7 +676,7 @@ runtime/CRT comes from the verified NVIDIA redistributables. Record both SDK
 versions from the build log and Conan graph, together with the wheel's runtime
 minimum versions. Each minimum must be at least the SDK version used to build.
 Before release, install the final wheel with pixtreme 2.19.0 and pixtreme-infer
-0.23.0 (the declared minima), and run the SDK, named-creation and ELF tests.
+0.24.0 (the declared minima), and run the SDK, named-creation and ELF tests.
 Also build from the sdist alone in a fresh build directory and Conan home, with
 Git discovery disabled, and perform the same wheel checks.
 
@@ -615,7 +690,7 @@ toolchain and does not invoke Conan again. Without an external toolchain, the
 development and wheel builds prepare their dependencies as described above.
 
 The build inputs in `cpp/conanfile.py` are `pixtreme/[>=2.19.0]`,
-`pixtreme-infer/[>=0.23.0]` and `tensoracle/[>=2.1.2]` with `shared=True`, plus
+`pixtreme-infer/[>=0.24.0]` and `tensoracle/[>=2.1.2]` with `shared=True`, plus
 `tensorrt/11.2.1.2` with `tensorrt/*:headers_only=True`. The build tool requirement
 is `cuda-toolkit/13.2.2` with `compiler=False`; enabling tests also requires
 `catch2/3.16.1`. Use a C++17 compiler, CMake 3.26 or newer, Ninja and the Conan CLI
@@ -685,9 +760,11 @@ A process must contain one instance of this module, shared by all its code. If a
 executable or library incorporates the static module, that artifact must be the
 only provider of this module in the process: do not load another artifact that
 incorporates it, or load this module's shared library in that process. The static
-form has no `pixtreme_infer_module_entry` function or entry shared library. Create
-models with `pixtreme_infer_cda_vsr_model_create`, and use the core C functions to
-prepare, run, close and destroy them. Python wheel builds always use the shared
+form provides `pixtreme_infer_module_entry_cda_vsr`; register it with core as
+shown above to query families and create models by name. It has no entry shared
+library or generic `pixtreme_infer_module_entry` function. Direct creation with
+`pixtreme_infer_cda_vsr_model_create` remains available. Use the core C functions
+to prepare, run, close and destroy models. Python wheel builds always use the shared
 form. The public SDK archive and wheel contain only shared libraries; the static
 form is built from source.
 
@@ -730,8 +807,13 @@ The recipe's shared form requires pixtreme, pixtreme-infer and tensoracle with
 under each dependency's own linkage rules. Each minimum version comes from the
 SDK version in the module's build lock; no upper bound is imposed. Run
 `conan install . --output-folder build --build=missing` with your Conan profile,
-then configure CMake with `-DCMAKE_TOOLCHAIN_FILE="$PWD/build/conan_toolchain.cmake"`
-and `-DCMAKE_BUILD_TYPE=Release`. CMake uses the SDK's own package:
+then configure CMake with `-DCMAKE_TOOLCHAIN_FILE="$PWD/build/conan_toolchain.cmake"`,
+`-DCMAKE_BUILD_TYPE=Release` and `-DTENSORRT_ROOT=/path/to/TensorRT`, pointing to the
+host's TensorRT installation. Alternatively, pass
+`-DTENSORACLE_TENSORRT_LIBRARY=/path/to/libnvinfer.so.11` or provide the
+`TensorRT::nvinfer` target before loading the module package. Tensoracle's CMake
+package requires this location during configuration, including for consumers of
+the relocated SDK. CMake uses the SDK's own package:
 `find_package(pixtreme_infer_cda_vsr CONFIG REQUIRED)` and
 `pixtreme_infer_cda_vsr::pixtreme_infer_cda_vsr` as the link target.
 The package finds its dependencies through the toolchain's `CMAKE_PREFIX_PATH`
