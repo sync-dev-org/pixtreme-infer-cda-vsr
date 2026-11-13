@@ -470,7 +470,7 @@ program linked against one major does not load a library of another major.
 
 ## Dependencies
 
-- Runtime dependencies are `pixtreme>=2.19.0`, `pixtreme-infer>=0.24.0`, `safetensors>=0.4`,
+- Runtime dependencies are `pixtreme>=2.20.0`, `pixtreme-infer>=0.24.0`, `safetensors>=0.4`,
   and `tensoracle>=2.1.2`. The host supplies the TensorRT runtime through apt.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
@@ -499,7 +499,7 @@ uv build --wheel
 The isolated wheel build installs the pinned Conan CLI from the build requirements.
 Before CMake configures the compiler, the bootstrap acquires the locked
 `cuda-toolkit`, `tensorrt`, `tensoracle`, `pixtreme` and `pixtreme-infer` recipes
-from the `v1.12.0` archive in the organization's private Conan recipe repository.
+from the `v1.13.0` archive in the organization's private Conan recipe repository.
 A checkout build requires the organization's GitHub authentication. The bootstrap
 uses the host's `gh` authentication in a temporary Conan home, removes the
 credential immediately after acquisition, and verifies `SHA256SUMS` and every
@@ -511,7 +511,7 @@ recipe copies and needs no GitHub login.
 CUDA runtime/CRT comes from `cuda-toolkit/13.2.2` with `compiler=False`;
 TensorRT headers come from `tensorrt/11.2.1.2` with `headers_only=True`;
 tensoracle's SDK comes from `tensoracle/[>=2.1.2]` with `shared=True`, locked to
-2.3.0. Pixtreme is locked to 2.19.0 and pixtreme-infer to 0.24.0, both with
+2.3.0. Pixtreme is locked to 2.20.0 and pixtreme-infer to 0.24.0, both with
 `shared=True`.
 
 No OS-installed CUDA toolkit or TensorRT SDK is needed. CUDA headers are supplied
@@ -675,7 +675,7 @@ directory beneath the build's Conan output directory.
 runtime/CRT comes from the verified NVIDIA redistributables. Record both SDK
 versions from the build log and Conan graph, together with the wheel's runtime
 minimum versions. Each minimum must be at least the SDK version used to build.
-Before release, install the final wheel with pixtreme 2.19.0 and pixtreme-infer
+Before release, install the final wheel with pixtreme 2.20.0 and pixtreme-infer
 0.24.0 (the declared minima), and run the SDK, named-creation and ELF tests.
 Also build from the sdist alone in a fresh build directory and Conan home, with
 Git discovery disabled, and perform the same wheel checks.
@@ -689,7 +689,7 @@ The CMake entry point is `cpp/`. A caller can supply a Conan-generated
 toolchain and does not invoke Conan again. Without an external toolchain, the
 development and wheel builds prepare their dependencies as described above.
 
-The build inputs in `cpp/conanfile.py` are `pixtreme/[>=2.19.0]`,
+The build inputs in `cpp/conanfile.py` are `pixtreme/[>=2.20.0]`,
 `pixtreme-infer/[>=0.24.0]` and `tensoracle/[>=2.1.2]` with `shared=True`, plus
 `tensorrt/11.2.1.2` with `tensorrt/*:headers_only=True`. The build tool requirement
 is `cuda-toolkit/13.2.2` with `compiler=False`; enabling tests also requires
