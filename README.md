@@ -470,7 +470,7 @@ program linked against one major does not load a library of another major.
 
 ## Dependencies
 
-- Runtime dependencies are `pixtreme>=2.22.1`, `pixtreme-infer>=0.25.3`, `safetensors>=0.4`,
+- Runtime dependencies are `pixtreme>=2.24.0`, `pixtreme-infer>=0.25.4`, `safetensors>=0.4`,
   and `tensoracle>=2.1.2`. The host supplies the TensorRT runtime through apt.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
@@ -497,13 +497,19 @@ uv build --wheel
 ```
 
 The isolated wheel build installs the pinned Conan CLI from the build requirements.
-Before CMake configures the compiler, the bootstrap acquires the locked
+Before CMake configures the compiler, `cpp/conan/prepare.py` acquires the locked
 `cuda-toolkit`, `tensorrt`, `tensoracle`, `pixtreme` and `pixtreme-infer` recipes
-from the `v1.37.0` archive in the organization's private Conan recipe repository.
-A checkout build requires the organization's GitHub authentication. The bootstrap
+from the `v1.52.0` archive in the organization's private Conan recipe repository.
+A checkout build requires the organization's GitHub authentication. The preparation script
 uses the host's `gh` authentication in a temporary Conan home, removes the
 credential immediately after acquisition, and verifies `SHA256SUMS` and every
-recipe revision against `cpp/conan.lock` before installing dependencies.
+recipe revision against `cpp/conan.lock` before installing dependencies. CMake and
+Ninja are also Conan dependencies: `cpp/conan/profiles/tools` declares their
+versions once for the consumer and dependencies in both host and build contexts.
+The profile excludes CMake and Ninja themselves to avoid circular tool requirements.
+The lock records CMake 3.31.12 and Ninja 1.13.2 and their recipe revisions.
+`CMakeDeps`, `CMakeToolchain` and `VirtualBuildEnv` generate dependency files,
+presets and `conanbuild.sh`. Neither CMake project installs dependencies.
 The SDK recipes unpack prebuilt shared libraries from public GitHub Releases;
 they do not compile upstream sources. A wheel build from the sdist uses bundled
 recipe copies and needs no GitHub login.
@@ -511,7 +517,7 @@ recipe copies and needs no GitHub login.
 CUDA runtime/CRT comes from `cuda-toolkit/13.2.2` with `compiler=False`;
 TensorRT headers come from `tensorrt/11.2.1.2` with `headers_only=True`;
 tensoracle's SDK comes from `tensoracle/[>=2.1.2]` with `shared=True`, locked to
-2.5.2. Pixtreme is locked to 2.22.1 and pixtreme-infer to 0.25.3, both with
+2.5.2. Pixtreme is locked to 2.24.0 and pixtreme-infer to 0.25.4, both with
 `shared=True`.
 
 No OS-installed CUDA toolkit or TensorRT SDK is needed. CUDA headers are supplied
@@ -539,6 +545,10 @@ initializers remain owned by pixtreme and pixtreme-infer. After changing source
 or running `uv sync`, repeat the `uv pip install` command above and use
 `uv run --no-sync` for subsequent commands.
 
+GPU tests declare `cupy-cuda13x[ctk]>=14.1` directly in the development dependency
+group. CuPy and its CUDA components are test inputs and are not runtime
+dependencies of this module's wheel.
+
 Conan supplies the pixtreme, pixtreme-infer and tensoracle SDKs for standalone
 C++ tests. The host must expose a compatible `libnvinfer.so.11` through its system
 loader or `LD_LIBRARY_PATH` for linking and running those tests and the Python
@@ -553,16 +563,23 @@ Python or require nanobind:
 uv tool install "$(.venv/bin/python -c 'import tomllib; print(next(r for r in tomllib.load(open("pyproject.toml", "rb"))["build-system"]["requires"] if r.startswith("conan==")))')"
 CDA_TENSORRT_RUNTIME=$(.venv/bin/python -c 'from importlib.metadata import distribution; print(distribution("tensorrt-cu13-libs").locate_file("tensorrt_libs").resolve())')
 export TENSORRT_ROOT="$CDA_TENSORRT_RUNTIME"
-cmake -P ../cpp/conan/prepare-tests.cmake
-cmake -S ../cpp -B ../build/cpp -G Ninja -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
-LD_LIBRARY_PATH="$CDA_TENSORRT_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" cmake --build ../build/cpp -j2
-LD_LIBRARY_PATH="$CDA_TENSORRT_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ctest --test-dir ../build/cpp --output-on-failure -LE gpu
+cd ..
+python/.venv/bin/python cpp/conan/prepare-tests.py --output build/cpp
+. ./build/cpp/conanbuild.sh
+cd cpp
+cmake --preset conan-release -DTENSORRT_ROOT="$TENSORRT_ROOT"
+LD_LIBRARY_PATH="$CDA_TENSORRT_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" cmake --build --preset conan-release -j8
+LD_LIBRARY_PATH="$CDA_TENSORRT_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ctest --preset conan-release --output-on-failure -LE gpu
+cd ../python
 ```
 
 The preparation command installs all three locked SDKs, CUDA, TensorRT headers and
-Catch2 packages. C++ test configuration and Python native helper configuration use only
-prepared packages (`--no-remote --build=never`) and never export recipes. Missing
-dependencies fail configuration with the preparation command. GPU CTest cases
+Catch2 and build-tool packages. Run preparation once before tests. For a separate
+native test build directory, `python cpp/conan/prepare.py --offline --output <directory>`
+uses only prepared packages (`--no-remote --build=never`) and never exports recipes.
+Add `--tests` when building the C++ tests. Missing dependencies fail preparation
+with the preparation command and cache settings. Configure with the resulting
+toolchain after activating that directory's `conanbuild.sh`. GPU CTest cases
 have the `gpu` label. The lifecycle case and the C entry's GPU cases
 take the documented ×2 `params_ema` safetensors checkpoint through
 `PIXTREME_CDA_VSR_CHECKPOINT`; the C entry's GPU cases add the residual-unit
@@ -576,7 +593,7 @@ package, which require CMake and C and C++ compilers. It also builds and install
 the module's standalone native SDK in `tests/test_native_install.py`; these tests
 require CMake, Ninja, Conan, a C++ compiler and `readelf` from binutils. Tests skip
 with instructions when their required tools are unavailable. Before running the
-native SDK tests, prepare the Conan packages with `cpp/conan/prepare-tests.cmake`
+native SDK tests, prepare the Conan packages with `cpp/conan/prepare-tests.py`
 as shown above. These tests use only prepared packages; missing packages fail
 configuration with the preparation command.
 
@@ -586,7 +603,12 @@ Build the native helpers as follows:
 uv venv ../build/native-tools
 uv pip install --python ../build/native-tools/bin/python 'nanobind>=2.4'
 CDA_NANOBIND=$(../build/native-tools/bin/python -m nanobind --cmake_dir)
-cmake -S tests/native -B ../build/python-tests -G Ninja -DCMAKE_BUILD_TYPE=Release -DPython_EXECUTABLE="$PWD/../build/native-tools/bin/python" -DCMAKE_PREFIX_PATH="$CDA_NANOBIND"
+.venv/bin/python ../cpp/conan/prepare.py --offline --output ../build/python-tests/conan
+. ../build/python-tests/conan/conanbuild.sh
+cmake -S tests/native -B ../build/python-tests -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_TOOLCHAIN_FILE="$PWD/../build/python-tests/conan/conan_toolchain.cmake" \
+  -DPython_EXECUTABLE="$PWD/../build/native-tools/bin/python" -DCMAKE_PREFIX_PATH="$CDA_NANOBIND" \
+  -DTENSORRT_ROOT="$TENSORRT_ROOT"
 LD_LIBRARY_PATH="$CDA_TENSORRT_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" cmake --build ../build/python-tests -j2
 LD_LIBRARY_PATH="$CDA_TENSORRT_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" uv run --no-sync pytest tests/test_import.py
 LD_LIBRARY_PATH="$CDA_TENSORRT_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" uv run --no-sync pytest -m "gpu and not performance"
@@ -597,10 +619,15 @@ and check both import orders without a GPU. The import tests and the checkpoint
 inspection tests skip with a build instruction when the helpers are absent. The
 helpers are excluded from the wheel.
 
-The default Conan profile is `cpp/conan/profiles/linux-gcc13`. Set the CMake
-cache variable `CDA_VSR_CONAN_PROFILE` to select a matching compiler profile, and
-`CDA_VSR_CONAN_CACHE` to an absolute path to select `core.cache:storage_path`.
-Use the same profile, package storage and `CONAN_HOME` for preparation and tests.
+The default Conan profile is `cpp/conan/profiles/linux-gcc-toolset-13`. Set the environment
+variable `CDA_VSR_CONAN_PROFILE` to select a matching compiler profile for both Conan
+contexts. Preparation overlays the common `tools` profile in both contexts.
+Set `CDA_VSR_CONAN_CACHE` to an absolute path to select `core.cache:storage_path`.
+These are preparation inputs, not CMake cache variables. `CDA_VSR_CONAN_ARGS`
+accepts additional Conan install arguments separated by spaces or semicolons;
+development defaults to `--build=missing`. Use the same profile, package storage
+and `CONAN_HOME` for preparation and tests. `CDA_VSR_CONAN_EXECUTABLE` can select
+the Conan CLI explicitly; its version must match `[build-system].requires`.
 For Python builds, pass settings through [scikit-build-core's environment
 variables](https://scikit-build-core.readthedocs.io/en/stable/configuration/index.html)
 on the build command. `SKBUILD_CMAKE_DEFINE` takes semicolon-separated
@@ -610,7 +637,8 @@ For example, from `python/`:
 ```console
 SKBUILD_BUILD_DIR="$PWD/../build/wheel" \
 SKBUILD_BUILD_TOOL_ARGS=-j8 \
-SKBUILD_CMAKE_DEFINE="CDA_VSR_CONAN_PROFILE=$PWD/../cpp/conan/profiles/linux-gcc13;CDA_VSR_CONAN_CACHE=$PWD/../build/conan-packages" \
+CDA_VSR_CONAN_PROFILE="$PWD/../cpp/conan/profiles/linux-gcc-toolset-13" \
+CDA_VSR_CONAN_CACHE="$PWD/../build/conan-packages" \
 uv build --wheel
 
 SKBUILD_BUILD_TOOL_ARGS=-j8 uv pip install --no-deps --reinstall-package pixtreme-infer-cda-vsr .
@@ -633,7 +661,10 @@ The sdist includes native sources, profiles, lock and license notices.
 `cuda-toolkit`, `tensorrt`, `tensoracle`, `pixtreme` and `pixtreme-infer` recipes and their notices
 into `cpp/conan/bundled/` in the archive. The shared recipe code uses the same MIT
 notice already included as the sdist's `LICENSE`. A small PEP 517 wrapper performs this
-step and delegates the build to scikit-build-core without modifying the checkout.
+step without needing CMake. For wheel and metadata hooks, the wrapper uses the same
+preparation process, activates the generated build environment and passes Conan's
+CMake, Ninja and toolchain to scikit-build-core. Wheel builds do not modify
+`cpp/CMakeUserPresets.json`; their generated files stay in the wheel build directory.
 A wheel build from the extracted archive exports these copies, checks every
 revision against the lock, and does not download any recipes or need a Git
 checkout or GitHub authentication. Public SDK and NVIDIA component downloads,
@@ -660,23 +691,43 @@ has RUNPATH `$ORIGIN`, and lists the module library in `NEEDED`. Inspect that en
 with `readelf -d` and `readelf --dyn-syms`, including in a wheel built from the sdist.
 
 For the GCC 14 manylinux image, set `CDA_VSR_CONAN_PROFILE` to the absolute path
-of `cpp/conan/profiles/linux-gcc14`, `CDA_VSR_CONAN_ARGS=--build=*`, and a writable
+of `cpp/conan/profiles/linux-gcc-toolset-14`,
+`CDA_VSR_CONAN_ARGS='--build=* --build=~cmake/* --build=~ninja/*'`, and a writable
 `CONAN_HOME` and `CDA_VSR_CONAN_CACHE` in the container environment. Conan is
-installed by the isolated Python build; the image needs no preinstalled Conan.
+installed by the isolated Python build; the image needs no preinstalled Conan,
+CMake or Ninja. Pass these settings using `docker run --env`, for example:
+
+```console
+docker run --rm --memory=32g \
+  --mount "type=bind,src=$PWD,dst=/source" \
+  --mount "type=bind,src=$CDA_VSR_HOST_CREDENTIALS,dst=/run/recipe-credentials.json,readonly" \
+  --env CDA_VSR_RECIPE_CREDENTIALS=/run/recipe-credentials.json \
+  --env CDA_VSR_CONAN_PROFILE=/source/cpp/conan/profiles/linux-gcc-toolset-14 \
+  --env 'CDA_VSR_CONAN_ARGS=--build=* --build=~cmake/* --build=~ninja/*' \
+  --env CONAN_HOME=/tmp/conan --env CDA_VSR_CONAN_CACHE=/tmp/conan/packages \
+  --env SKBUILD_BUILD_TOOL_ARGS=-j8 --env SKBUILD_BUILD_DIR=/tmp/cda-vsr-build \
+  --env CUDA_VISIBLE_DEVICES= --workdir /source/python \
+  "$CDA_VSR_BUILD_IMAGE" uv build --wheel
+```
+
+Here `CDA_VSR_BUILD_IMAGE` is the pinned compiler/Python image, and
+`CDA_VSR_HOST_CREDENTIALS` names the temporary host credential file.
 For a checkout build in a container, create a temporary credential file on the
 host using the organization's authentication and mount it read-only outside the
 source and output directories. Set `CDA_VSR_RECIPE_CREDENTIALS` to its container
 path. Remove the file when the container exits and keep it out of images,
 archives and logs.
 
-When `CONAN_HOME` is unset and HOME is unwritable, configuration uses a `home/`
+When `CONAN_HOME` is unset and HOME is unwritable, preparation uses a `home/`
 directory beneath the build's Conan output directory.
 `--build=*` packages the prebuilt SDKs without compiling their sources; CUDA
-runtime/CRT comes from the verified NVIDIA redistributables. Record both SDK
+runtime/CRT comes from the verified NVIDIA redistributables. Third-party libraries
+are built in the image; CMake and Ninja must be available as downloaded binaries.
+Record both SDK
 versions from the build log and Conan graph, together with the wheel's runtime
 minimum versions. Each minimum must be at least the SDK version used to build.
-Before release, install the final wheel with pixtreme 2.22.1 and pixtreme-infer
-0.25.3 (the declared minima), and run the SDK, named-creation and ELF tests.
+Before release, install the final wheel with pixtreme 2.24.0 and pixtreme-infer
+0.25.4 (the declared minima), and run the SDK, named-creation and ELF tests.
 Also build from the sdist alone in a fresh build directory and Conan home, with
 Git discovery disabled, and perform the same wheel checks.
 
@@ -685,12 +736,14 @@ Git discovery disabled, and perform the same wheel checks.
 ### Build the native SDK from source
 
 The CMake entry point is `cpp/`. A caller can supply a Conan-generated
-`CMakeToolchain` and `CMakeDeps` configuration; the bootstrap then keeps that
-toolchain and does not invoke Conan again. Without an external toolchain, the
-development and wheel builds prepare their dependencies as described above.
+`CMakeToolchain` and `CMakeDeps` configuration. CMake uses that toolchain as supplied
+and never invokes Conan. For a development checkout, run `cpp/conan/prepare.py`
+and activate its `conanbuild.sh` before configuring, as described above.
+A `conan create`, `FetchContent` or `add_subdirectory` caller owns dependency
+installation and declares the required packages and tools in its own recipe and profiles.
 
-The build inputs in `cpp/conanfile.py` are `pixtreme/[>=2.22.1]`,
-`pixtreme-infer/[>=0.25.3]` and `tensoracle/[>=2.1.2]` with `shared=True`, plus
+The build inputs in `cpp/conanfile.py` are `pixtreme/[>=2.24.0]`,
+`pixtreme-infer/[>=0.25.4]` and `tensoracle/[>=2.1.2]` with `shared=True`, plus
 `tensorrt/11.2.1.2` with `tensorrt/*:headers_only=True`. The build tool requirement
 is `cuda-toolkit/13.2.2` with `compiler=False`; enabling tests also requires
 `catch2/3.16.1`. Use a C++17 compiler, CMake 3.26 or newer, Ninja and the Conan CLI
