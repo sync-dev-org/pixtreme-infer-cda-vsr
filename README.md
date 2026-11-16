@@ -470,8 +470,8 @@ program linked against one major does not load a library of another major.
 
 ## Dependencies
 
-- Runtime dependencies are `pixtreme>=2.24.0`, `pixtreme-infer>=0.25.4`, `safetensors>=0.4`,
-  and `tensoracle>=2.1.2`. The host supplies the TensorRT runtime through apt.
+- Runtime dependencies are `pixtreme>=2.26.0`, `pixtreme-infer>=0.26.0`, `safetensors>=0.4`,
+  and `tensoracle>=2.6.0`. The host supplies the TensorRT runtime through apt.
   The module does not rely on core extras.
 - Development and tests use the published `pixtreme-infer` distribution from PyPI.
   The `dev` dependency group installs `tensoracle[convert]`, PyTorch, and
@@ -499,7 +499,7 @@ uv build --wheel
 The isolated wheel build installs the pinned Conan CLI from the build requirements.
 Before CMake configures the compiler, `cpp/conan/prepare.py` acquires the locked
 `cuda-toolkit`, `tensorrt`, `tensoracle`, `pixtreme` and `pixtreme-infer` recipes
-from the `v1.52.0` archive in the organization's private Conan recipe repository.
+from the `v1.83.0` archive in the organization's private Conan recipe repository.
 A checkout build requires the organization's GitHub authentication. The preparation script
 uses the host's `gh` authentication in a temporary Conan home, removes the
 credential immediately after acquisition, and verifies `SHA256SUMS` and every
@@ -509,15 +509,15 @@ versions once for the consumer and dependencies in both host and build contexts.
 The profile excludes CMake and Ninja themselves to avoid circular tool requirements.
 The lock records CMake 3.31.12 and Ninja 1.13.2 and their recipe revisions.
 `CMakeDeps`, `CMakeToolchain` and `VirtualBuildEnv` generate dependency files,
-presets and `conanbuild.sh`. Neither CMake project installs dependencies.
+presets and `conanbuild.sh` (`conanbuild.bat` on Windows). Neither CMake project installs dependencies.
 The SDK recipes unpack prebuilt shared libraries from public GitHub Releases;
 they do not compile upstream sources. A wheel build from the sdist uses bundled
 recipe copies and needs no GitHub login.
 
 CUDA runtime/CRT comes from `cuda-toolkit/13.2.2` with `compiler=False`;
 TensorRT headers come from `tensorrt/11.2.1.2` with `headers_only=True`;
-tensoracle's SDK comes from `tensoracle/[>=2.1.2]` with `shared=True`, locked to
-2.5.2. Pixtreme is locked to 2.24.0 and pixtreme-infer to 0.25.4, both with
+tensoracle's SDK comes from `tensoracle/[>=2.6.0]` with `shared=True`, locked to
+2.6.0. Pixtreme is locked to 2.26.0 and pixtreme-infer to 0.26.0, both with
 `shared=True`.
 
 No OS-installed CUDA toolkit or TensorRT SDK is needed. CUDA headers are supplied
@@ -531,7 +531,7 @@ proprietary runtime.
 
 The isolated wheel build installs `tensorrt-cu13>=11.2,<12` from its build
 requirements. Configuration supplies the isolated environment's TensorRT runtime
-directory to tensoracle's CMake package through `TENSORRT_ROOT`. Stub generation
+directory to tensoracle's CMake package through `TENSORRT_ROOT`. On Linux, stub generation
 loads the Conan tensoracle library and receives that directory through `LD_LIBRARY_PATH`
 for that command only. A wheel build needs no preinstalled TensorRT runtime on its
 host or container. The module's RUNPATH does not include TensorRT, and its wheel
@@ -569,9 +569,13 @@ python/.venv/bin/python cpp/conan/prepare-tests.py --output build/cpp
 cd cpp
 cmake --preset conan-release -DTENSORRT_ROOT="$TENSORRT_ROOT"
 LD_LIBRARY_PATH="$CDA_TENSORRT_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" cmake --build --preset conan-release -j8
-LD_LIBRARY_PATH="$CDA_TENSORRT_RUNTIME${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ctest --preset conan-release --output-on-failure -LE gpu
+LD_LIBRARY_PATH="$TENSORRT_ROOT" ctest --test-dir ../build/cpp --output-on-failure -LE gpu
 cd ../python
 ```
+
+Run CTest directly in the build directory because Conan's test preset prepends
+its core SDK to `LD_LIBRARY_PATH`, overriding the test's staged core library
+and its module discovery layout.
 
 The preparation command installs all three locked SDKs, CUDA, TensorRT headers and
 Catch2 and build-tool packages. Run preparation once before tests. For a separate
@@ -584,6 +588,13 @@ have the `gpu` label. The lifecycle case and the C entry's GPU cases
 take the documented ×2 `params_ema` safetensors checkpoint through
 `PIXTREME_CDA_VSR_CHECKPOINT`; the C entry's GPU cases add the residual-unit
 metadata to a temporary copy and keep their engines under the build directory.
+
+After setting that checkpoint input and selecting the allocated GPU through
+`CUDA_VISIBLE_DEVICES`, run GPU CTest cases serially from `cpp/`:
+
+```console
+LD_LIBRARY_PATH="$TENSORRT_ROOT" ctest --test-dir ../build/cpp --output-on-failure -L gpu -j1
+```
 
 Python tests use native helpers for import compatibility, the C++ checkpoint
 inspection, direct access to the module's TensorRT engines, and small GPU test
@@ -619,7 +630,9 @@ and check both import orders without a GPU. The import tests and the checkpoint
 inspection tests skip with a build instruction when the helpers are absent. The
 helpers are excluded from the wheel.
 
-The default Conan profile is `cpp/conan/profiles/linux-gcc-toolset-13`. Set the environment
+The default Conan profile is `cpp/conan/profiles/linux-gcc-toolset-13` on Linux and
+`cpp/conan/profiles/windows-msvc194` on native Windows x86_64 (Visual Studio 2022,
+MSVC 19.44, dynamic release CRT). Set the environment
 variable `CDA_VSR_CONAN_PROFILE` to select a matching compiler profile for both Conan
 contexts. Preparation overlays the common `tools` profile in both contexts.
 Set `CDA_VSR_CONAN_CACHE` to an absolute path to select `core.cache:storage_path`.
@@ -647,6 +660,57 @@ SKBUILD_BUILD_TOOL_ARGS=-j8 uv pip install --no-deps --reinstall-package pixtrem
 Global uv `-C` settings also reach dependency sdist builds, where changing a
 build path creates separate uv cache entries. Use the environment variables
 above to avoid passing these settings through uv's dependency build cache keys.
+
+On native Windows, use **cmd** and install the Conan CLI version declared in
+`python/pyproject.toml` with `uv tool install`. Prepare `python/.venv` with
+`uv sync --no-install-project --python 3.12` from `python/`, then run the following
+from the repository root. In a batch file, stop after each failed command as shown:
+
+```bat
+set CUDA_VISIBLE_DEVICES=-1
+set TENSORRT_ROOT=%CD%\python\.venv\Lib\site-packages\tensorrt_libs
+set PATH=%TENSORRT_ROOT%;%PATH%
+python\.venv\Scripts\python.exe cpp\conan\prepare-tests.py --output build\cpp
+if errorlevel 1 exit /b 1
+call build\cpp\conanbuild.bat
+if errorlevel 1 exit /b 1
+cd cpp
+cmake --preset conan-release
+if errorlevel 1 exit /b 1
+cmake --build --preset conan-release --parallel 8
+if errorlevel 1 exit /b 1
+ctest --test-dir ..\build\cpp --output-on-failure -LE gpu
+if errorlevel 1 exit /b 1
+cd ..\python
+set SKBUILD_BUILD_TOOL_ARGS=-j8
+uv build --wheel --python .venv\Scripts\python.exe
+if errorlevel 1 exit /b 1
+```
+
+Preparation also obtains `nvinfer_11.lib` from the **same locked** TensorRT recipe
+with `headers_only=False` in a separate graph and supplies it through
+`TENSORACLE_TENSORRT_LIBRARY`. The consumer's direct TensorRT requirement remains
+headers-only. The runtime above is a test-host input: `PATH` lets TensorRT locate
+its builder resource DLLs, and the test runner registers its DLL directory for
+Python extension loading. Neither the runtime nor its import library enters this
+module's wheel. The isolated wheel build registers the actual Conan SDK DLL
+directories before generating stubs, without importing dependency wheels.
+
+Windows wheels install `pixtreme_infer_cda_vsr-1.dll` and the fixed-name
+`pixtreme_infer_cda_vsr_entry.dll` in `pixtreme/infer/cda_vsr/bin/`; the import
+library `pixtreme_infer_cda_vsr.lib` and CMake package remain under `lib/`.
+The package initializes pixtreme-infer and tensoracle before registering its own
+`bin/` and importing `_native`. The caller supplies TensorRT's runtime directory.
+
+For Windows Python tests, build `tests/native` with the prepared toolchain,
+the Windows Python interpreter and nanobind's CMake directory. The helper derives
+GNU linker-observation support from CMake; only tests that require `--wrap` skip
+when that support is absent. PE exports and shared/static C consumers are checked
+by `tests/test_windows_native.py`. After selecting the allocated GPU, run
+`pytest -m "gpu and not performance"` and run CTest with `-L gpu -j1`.
+The public model lifecycle, named entry, fp32 training parity and reduced-precision
+quality tests run on Windows. ELF, SONAME and GNU linker probes retain their Linux
+checks and carry explicit Windows skip reasons.
 
 For the entry library's dependency regression check on Linux, build with
 `SKBUILD_CMAKE_DEFINE='CMAKE_SHARED_LINKER_FLAGS=-Wl,--no-as-needed'` on the
@@ -726,8 +790,8 @@ are built in the image; CMake and Ninja must be available as downloaded binaries
 Record both SDK
 versions from the build log and Conan graph, together with the wheel's runtime
 minimum versions. Each minimum must be at least the SDK version used to build.
-Before release, install the final wheel with pixtreme 2.24.0 and pixtreme-infer
-0.25.4 (the declared minima), and run the SDK, named-creation and ELF tests.
+Before release, install the final wheel with pixtreme 2.26.0, pixtreme-infer
+0.26.0 and tensoracle 2.6.0 (the declared minima), and run the SDK, named-creation and ELF tests.
 Also build from the sdist alone in a fresh build directory and Conan home, with
 Git discovery disabled, and perform the same wheel checks.
 
@@ -742,8 +806,8 @@ and activate its `conanbuild.sh` before configuring, as described above.
 A `conan create`, `FetchContent` or `add_subdirectory` caller owns dependency
 installation and declares the required packages and tools in its own recipe and profiles.
 
-The build inputs in `cpp/conanfile.py` are `pixtreme/[>=2.24.0]`,
-`pixtreme-infer/[>=0.25.4]` and `tensoracle/[>=2.1.2]` with `shared=True`, plus
+The build inputs in `cpp/conanfile.py` are `pixtreme/[>=2.26.0]`,
+`pixtreme-infer/[>=0.26.0]` and `tensoracle/[>=2.6.0]` with `shared=True`, plus
 `tensorrt/11.2.1.2` with `tensorrt/*:headers_only=True`. The build tool requirement
 is `cuda-toolkit/13.2.2` with `compiler=False`; enabling tests also requires
 `catch2/3.16.1`. Use a C++17 compiler, CMake 3.26 or newer, Ninja and the Conan CLI
